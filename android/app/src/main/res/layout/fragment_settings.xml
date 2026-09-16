@@ -91,6 +91,50 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
+        <!-- 1b. セットアップカード (§6.4。不足が無いときは GONE) -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardSetup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="@color/nocturne_surface"
+            app:cardCornerRadius="16dp"
+            app:strokeColor="@color/nocturne_border"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:id="@+id/tvSetupTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/nocturne_text"
+                    android:textSize="15sp" />
+
+                <TextView
+                    android:id="@+id/tvSetupLines"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="4dp"
+                    android:textColor="@color/nocturne_text_dim"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSetupOpen"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/setup_card_open"
+                    android:textColor="@color/nocturne_accent_text" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
         <!-- 2. 接続カード (インライン入力。欄から離れた時点で保存する) -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
@@ -392,6 +436,22 @@
                     android:text="@string/settings_sw_device_contacts_desc"
                     android:textColor="@color/nocturne_text_dim"
                     android:textSize="12sp" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/swQuiet"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_sw_quiet"
+                    android:textColor="@color/nocturne_text" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="2dp"
+                    android:text="@string/settings_sw_quiet_desc"
+                    android:textColor="@color/nocturne_text_dim"
+                    android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -556,6 +616,69 @@
                         android:textColor="@color/nocturne_text_dim"
                         android:textSize="13sp" />
                 </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowPermMic"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingTop="12dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/settings_row_perm_mic"
+                        android:textColor="@color/nocturne_text"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:id="@+id/tvPermMic"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_perm_denied"
+                        android:textColor="@color/nocturne_text_dim"
+                        android:textSize="13sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/rowPermHibernation"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingTop="12dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/settings_row_perm_hibernation"
+                        android:textColor="@color/nocturne_text"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:id="@+id/tvPermHibernation"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_perm_denied"
+                        android:textColor="@color/nocturne_text_dim"
+                        android:textSize="13sp" />
+                </LinearLayout>
+
+                <!-- Samsung 端末のみ: One UI のスリープ案内 (§6.0 B。API では取れないため案内行だけ) -->
+                <TextView
+                    android:id="@+id/tvSamsungGuide"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="?attr/selectableItemBackground"
+                    android:paddingTop="12dp"
+                    android:paddingBottom="4dp"
+                    android:text="@string/settings_samsung_guide"
+                    android:textColor="@color/nocturne_text_dim"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

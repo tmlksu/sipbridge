@@ -10,7 +10,9 @@ import org.json.JSONObject
 object RelayProtocol {
 
     // versionName から組み立てる (build.gradle と二重管理にしない)。
-    val CLIENT_VERSION = "SipBridge/" + BuildConfig.VERSION_NAME
+    // flavor (gms/foss) も付ける。relay のログで「FCM の無い foss を入れてしまった」を
+    // 即座に見分けられるようにするため (push が登録されない不具合の切り分け)。
+    val CLIENT_VERSION = "SipBridge/" + BuildConfig.VERSION_NAME + "-" + BuildConfig.FLAVOR
     const val SESSION_PATH = "/v1/session"
 
     // ---------- relay -> app ----------
