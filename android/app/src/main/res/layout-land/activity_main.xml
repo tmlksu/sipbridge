@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 横画面 (Echo Show 5: 960x480) 用。ボトムナビだとキーパッド 4 行 + 発信ボタンに
+     必要な縦 (400dp 強) が確保できず潰れるため、左サイドレール (NavigationRailView) にする。
+     view ID は縦版と揃える (MainActivity は NavigationBarView として扱う)。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/rootMain"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/nocturne_bg"
+    android:orientation="horizontal">
+
+    <com.google.android.material.navigationrail.NavigationRailView
+        android:id="@+id/bottomNav"
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:background="@color/nocturne_surface"
+        app:elevation="0dp"
+        app:itemIconSize="22dp"
+        app:itemIconTint="@color/nav_item_color"
+        app:itemMinHeight="64dp"
+        app:itemTextAppearanceActive="@style/TextAppearance.SipBridge.NavLabel"
+        app:itemTextAppearanceInactive="@style/TextAppearance.SipBridge.NavLabel"
+        app:itemTextColor="@color/nav_item_color"
+        app:labelVisibilityMode="labeled"
+        app:menu="@menu/bottom_nav" />
+
+    <View
+        android:layout_width="1dp"
+        android:layout_height="match_parent"
+        android:background="@color/nocturne_border" />
+
+    <FrameLayout
+        android:id="@+id/fragmentContainer"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1" />
+</LinearLayout>

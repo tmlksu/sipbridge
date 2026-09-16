@@ -1,0 +1,46 @@
+SIP Bridge is the Android client for <b>sipbridge</b>, a self-hosted setup that lets
+you use your home SIP extension from outside the house <b>without opening any port on
+your router</b> and <b>without listening on plaintext UDP 5060</b> on the phone.
+
+<b>You must run the relay yourself.</b> This app is useless on its own — it talks to
+<i>sipbridge relay</i>, a small Go service (Docker image provided) that you run on your
+own LAN next to your PBX. The relay registers to your SIP server as an ordinary
+extension and exposes a single authenticated WebSocket to the app. Any SIP registrar
+works: Asterisk, FreePBX, or the built-in SIP server of a Japanese fibre-optic
+telephony home gateway (NTT HGW).
+
+<b>How it works</b>
+
+App --WSS (JSON + RTP frames)--> your reverse proxy / tunnel --> relay --SIP+RTP on
+your LAN--> your PBX
+
+The phone opens no listening socket at all. Signalling and audio share one outbound
+TLS WebSocket, so the connection works from behind CGNAT and hotel Wi-Fi alike.
+
+<b>Features</b>
+
+* Incoming and outgoing calls, G.711 (PCMU/PCMA)
+* Keypad, call history, optional on-device contact name lookup
+* Full-screen incoming call over the lock screen
+* Persistent mode: a foreground service holds the WebSocket open (good for an
+  always-powered tablet or kiosk device)
+* Multiple SIP accounts, configured from the app and stored by the relay
+* Settings encrypted at rest (EncryptedSharedPreferences)
+
+<b>About this build</b>
+
+This is the <i>foss</i> flavour. It contains no Google Play Services and no Firebase,
+so <b>push notifications are not available</b> — the app must stay connected in
+persistent mode to receive calls. That is the intended setup for a device that is
+always powered on.
+
+<b>Privacy</b>
+
+The app talks only to the relay URL you configure. There is no analytics, no
+telemetry, and no third-party service. Audio is carried inside the TLS WebSocket to
+your own relay; note that if you terminate TLS at a CDN or tunnel provider, that
+provider can see the media. Contact names, when enabled, are resolved entirely
+on-device and never leave the phone.
+
+Setup instructions, the relay source and the protocol specification are in the source
+repository.

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P1: BottomNavigation + 4 Fragment の入れ物。旧 1 画面設定 UI は廃止。
+     targetSdk 35 (Android 15) は edge-to-edge が強制されるため、
+     システムバーのインセットは MainActivity が明示的に配る
+     (上/左右 = fragmentContainer の padding、下 = bottomNav の padding)。
+     ナビの高さは wrap_content。固定 56dp だとジェスチャーバー分の
+     padding でアイコンとラベルが潰れる。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/rootMain"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/nocturne_bg"
+    android:orientation="vertical">
+
+    <FrameLayout
+        android:id="@+id/fragmentContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/nocturne_border" />
+
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/bottomNav"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/nocturne_surface"
+        app:elevation="0dp"
+        app:itemIconSize="22dp"
+        app:itemIconTint="@color/nav_item_color"
+        app:itemTextAppearanceActive="@style/TextAppearance.SipBridge.NavLabel"
+        app:itemTextAppearanceInactive="@style/TextAppearance.SipBridge.NavLabel"
+        app:itemTextColor="@color/nav_item_color"
+        app:labelVisibilityMode="labeled"
+        app:menu="@menu/bottom_nav" />
+</LinearLayout>

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 公開リポジトリへインスタンス固有情報が混入していないか、コミット前に検査する。
+#
+# このフックを有効にする (clone 後に 1 回。ローカル設定なので共有はされない):
+#   git config core.hooksPath .githooks
+#
+# ops/ が無い public クローンでは実値パターンの検査だけがスキップされ、
+# 残りの検査 (秘密鍵・.env の追跡・team ドメイン・グローバル IP・ops/ の追跡)
+# はそのまま走る。
+set -euo pipefail
+exec "$(git rev-parse --show-toplevel)/scripts/check-public-safe.sh"

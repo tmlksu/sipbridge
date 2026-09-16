@@ -1,0 +1,46 @@
+# sipbridge 用 compose 定義。deploy/ ディレクトリで操作すること:
+#   cp .env.example .env   # 編集して値を入れる
+#   docker compose config  # 検証
+#   docker compose up -d --build
+#
+# relay と cloudflared はどちらも network_mode: host。
+# 理由: relay が RTP 用 UDP ポート範囲 (RTP_PORT_MIN..MAX) を使うため、
+# ポートマッピングより host モードが素直。relay 自身は LISTEN
+# (既定 127.0.0.1:8080) のみで待ち受け、外部公開は cloudflared 経由のみ。
+
+name: sipbridge
+
+services:
+  relay:
+    build:
+      context: ../relay
+      dockerfile: ../deploy/Dockerfile
+    image: sipbridge-relay:latest
+    container_name: sipbridge-relay
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false # .env 無しでも `docker compose config` が通るように (本番は .env を置くこと)
+    restart: unless-stopped
+    # 状態ファイル (push トークン) と FCM サービスアカウントの置き場。
+    # network_mode: host でもファイルシステムはコンテナ内なので bind mount が必要。
+    # 事前に: mkdir -p data && sudo chown 65532:65532 data (relay は UID 65532 で動く)
+    volumes:
+      - ./data:/var/lib/sipbridge
+    # scratch ベース (curl 無し) のため relay 自身のサブコマンドで判定する。
+    # 前提 (T1): `relay healthcheck` が LISTEN 先の /healthz を叩き、
+    # 200 なら exit 0、そうでなければ非ゼロで終了する。
+    healthcheck:
+      test: ["CMD", "/relay", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: sipbridge-cloudflared
+    network_mode: host
+    # TUNNEL_TOKEN は .env で渡す (compose が deploy/.env を自動読込して展開する)。
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN:-}
+    restart: unless-stopped

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 横画面 (Echo Show 5: 利用可能 h321dp) はキー間隔を詰める。
+     キーの高さは画面高から KeypadFragment が算出する (40〜56dp)。 -->
+<resources>
+    <dimen name="keypad_key_margin">4dp</dimen>
+</resources>
