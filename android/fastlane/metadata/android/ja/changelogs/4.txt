@@ -1,0 +1,2 @@
+* applicationId を io.github.tmlksu.sipbridge に変更 (旧 net.peyan.sipbridge からの更新はできません。一度アンインストールしてから入れ直してください)
+* GitHub Releases 向けにリリース署名を追加

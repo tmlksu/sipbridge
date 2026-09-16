@@ -8,8 +8,8 @@
             android:name=".DebugConfigReceiver"
             android:exported="true">
             <intent-filter>
-                <action android:name="net.peyan.sipbridge.DEBUG_SET_CONFIG" />
-                <action android:name="net.peyan.sipbridge.DEBUG_CALL_ACTION" />
+                <action android:name="io.github.tmlksu.sipbridge.DEBUG_SET_CONFIG" />
+                <action android:name="io.github.tmlksu.sipbridge.DEBUG_CALL_ACTION" />
             </intent-filter>
         </receiver>
     </application>

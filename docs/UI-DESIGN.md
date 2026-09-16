@@ -219,6 +219,6 @@ Echo Show 5 は利用可能高さが 321dp しかなく、下にナビを置く�
   端末の連絡先は v1.2 で連携 (取り込み or 任意表示。§1.3)。アプリから端末側への書き込みはしない。
 - 番号のフォーマットはしない (入力どおり)。
 - debug ビルドのみ、adb から設定を投入できる `DebugConfigReceiver`
-  (`adb shell am broadcast -a net.peyan.sipbridge.DEBUG_SET_CONFIG --es relayUrl ... --es sipUser ...`)。
+  (`adb shell am broadcast -a io.github.tmlksu.sipbridge.DEBUG_SET_CONFIG --es relayUrl ... --es sipUser ...`)。
   Echo Show など入力しづらい端末の初期設定用。release には含めない (`src/debug` 配下 + debug manifest)。
 - 旧 `MainActivity` の 1 画面設定 UI と `activity_main.xml` は廃止。`activity_incoming.xml` も置換。
