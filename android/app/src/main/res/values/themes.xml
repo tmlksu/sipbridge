@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ダーク専用テーマ (DayNight 不要)。背景 nocturne_bg、colorPrimary=nocturne_accent。 -->
+    <style name="Theme.SipBridge" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/nocturne_accent</item>
+        <item name="colorPrimaryVariant">@color/nocturne_accent_soft</item>
+        <item name="colorOnPrimary">@color/nocturne_text</item>
+        <item name="colorSecondary">@color/nocturne_accent</item>
+        <item name="colorSecondaryVariant">@color/nocturne_accent_soft</item>
+        <item name="colorOnSecondary">@color/nocturne_text</item>
+        <item name="android:colorBackground">@color/nocturne_bg</item>
+        <item name="android:windowBackground">@color/nocturne_bg</item>
+        <item name="android:statusBarColor">@color/nocturne_bg</item>
+        <item name="android:navigationBarColor">@color/nocturne_bg</item>
+        <item name="android:textColorPrimary">@color/nocturne_text</item>
+        <item name="android:textColorSecondary">@color/nocturne_text_dim</item>
+    </style>
+    <!-- P2: CallActivity (着信/発信/通話中) 用。背景 Nocturne。 -->
+    <style name="Theme.SipBridge.Call" parent="Theme.SipBridge">
+        <item name="android:windowShowWallpaper">false</item>
+        <item name="android:windowBackground">@color/nocturne_bg</item>
+    </style>
+    <!-- ボトムナビのラベル (2 行に折れて潰れないよう 11sp 固定)。 -->
+    <style name="TextAppearance.SipBridge.NavLabel" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="android:textSize">11sp</item>
+        <item name="android:maxLines">1</item>
+    </style>
+    <!-- 設定のインライン入力欄 (UI-DESIGN §1.4。ダイアログを廃止し直接入力する)。 -->
+    <style name="Widget.SipBridge.TextInput" parent="Widget.MaterialComponents.TextInputLayout.OutlinedBox">
+        <item name="boxStrokeColor">@color/input_stroke</item>
+        <item name="boxStrokeWidth">1dp</item>
+        <item name="boxStrokeWidthFocused">2dp</item>
+        <item name="boxCornerRadiusTopStart">12dp</item>
+        <item name="boxCornerRadiusTopEnd">12dp</item>
+        <item name="boxCornerRadiusBottomStart">12dp</item>
+        <item name="boxCornerRadiusBottomEnd">12dp</item>
+        <item name="boxBackgroundColor">@color/nocturne_surface_hi</item>
+        <item name="hintTextColor">@color/nocturne_accent_text</item>
+        <item name="android:textColorHint">@color/nocturne_text_dim</item>
+        <item name="endIconTint">@color/nocturne_text_dim</item>
+        <item name="helperTextTextColor">@color/nocturne_text_dim</item>
+        <item name="android:layout_marginTop">12dp</item>
+    </style>
+    <style name="Widget.SipBridge.TextInput.Edit" parent="Widget.MaterialComponents.TextInputEditText.OutlinedBox">
+        <item name="android:textColor">@color/nocturne_text</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:imeOptions">actionDone</item>
+    </style>
+</resources>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Nocturne カラートークン (docs/UI-DESIGN.md §0)。ダーク専用。全画面で使う。 -->
+<resources>
+    <color name="nocturne_bg">#0B0B11</color>
+    <color name="nocturne_surface">#14141C</color>
+    <color name="nocturne_surface_hi">#1C1C27</color>
+    <color name="nocturne_border">#262633</color>
+    <color name="nocturne_text">#ECECF4</color>
+    <color name="nocturne_text_dim">#8B8BA0</color>
+    <color name="nocturne_accent">#6B5FD6</color>
+    <color name="nocturne_accent_soft">#2A2652</color>
+    <color name="nocturne_accent_text">#C9C2FF</color>
+    <color name="nocturne_neutral_btn">#2A2A36</color>
+    <color name="nocturne_missed">#D98A8A</color>
+</resources>

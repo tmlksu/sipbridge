@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 設定のインライン入力欄の枠線 (フォーカス中=accent、通常=border)。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="@color/nocturne_accent" android:state_focused="true" />
+    <item android:color="@color/nocturne_border" />
+</selector>

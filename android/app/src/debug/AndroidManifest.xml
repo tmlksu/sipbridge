@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- debug ビルドのみ平文 ws:// を許可 (adb reverse でのローカル結合試験用)。
+     リリースビルドには影響しない。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:usesCleartextTraffic="true">
+        <!-- debug 専用の adb 設定投入口。release には含めない。 -->
+        <receiver
+            android:name=".DebugConfigReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="net.peyan.sipbridge.DEBUG_SET_CONFIG" />
+                <action android:name="net.peyan.sipbridge.DEBUG_CALL_ACTION" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

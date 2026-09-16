@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- scripts/gen-icon.py が生成する。手で編集しない。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FF6B5FD6"
+        android:fillType="nonZero"
+        android:pathData="M0,0L108,0L108,108L0,108Z" />
+</vector>

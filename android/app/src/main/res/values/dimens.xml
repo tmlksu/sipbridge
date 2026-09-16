@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- キーパッドの丸キー (KeypadFragment がコードで 3x4 に並べるため寸法をここに置く)。 -->
+<resources>
+    <dimen name="keypad_key_width">72dp</dimen>
+    <dimen name="keypad_key_height">72dp</dimen>
+    <dimen name="keypad_key_margin">6dp</dimen>
+</resources>

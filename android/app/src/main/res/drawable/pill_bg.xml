@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 状態ピル・モードチップの背景 (角丸 16dp、surface 地 + border 枠)。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <corners android:radius="16dp" />
+    <solid android:color="@color/nocturne_surface" />
+    <stroke android:width="1dp" android:color="@color/nocturne_border" />
+</shape>

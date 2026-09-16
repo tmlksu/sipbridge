@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ボトムナビのアイコン・文字色 (選択中=accent、未選択=text_dim)。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="@color/nocturne_accent" android:state_checked="true" />
+    <item android:color="@color/nocturne_text_dim" />
+</selector>

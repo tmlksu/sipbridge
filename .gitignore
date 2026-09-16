@@ -1,0 +1,22 @@
+# secrets
+.env
+*.pem
+google-services.json
+service-account*.json
+# go
+relay/relay
+relay/bin/
+# android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+# misc
+*.log
+deploy/data/
+
+# instance-specific (private repo; see ops/ENVIRONMENT.md)
+ops/

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ボトムナビ「キーパッド」。3x3 + 下中央の丸 (dialpad)。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?attr/colorControlNormal">
+    <path android:fillColor="@android:color/white"
+        android:pathData="M3.1,4.5a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M10.1,4.5a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M17.1,4.5a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M3.1,10.0a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M10.1,10.0a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M17.1,10.0a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M3.1,15.5a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M10.1,15.5a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M17.1,15.5a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+    <path android:fillColor="@android:color/white"
+        android:pathData="M10.1,21.0a1.9,1.9 0 1,0 3.8,0a1.9,1.9 0 1,0 -3.8,0z" />
+</vector>

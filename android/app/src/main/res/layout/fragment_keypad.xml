@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- UI-DESIGN §1.1 キーパッド。丸キーは KeypadFragment がコードで 3x4 に並べる。
+     片手操作のため、キー・発信ボタンは画面下端寄せ。番号表示はキーのすぐ上に置き、
+     余白は上側 (状態ピルとの間) に寄せる。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/nocturne_bg"
+    android:gravity="center_horizontal"
+    android:orientation="vertical"
+    android:paddingStart="16dp"
+    android:paddingTop="12dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="8dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/tvStatusPill"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="@drawable/pill_bg"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:padding="8dp"
+            android:text="@string/keypad_status_offline"
+            android:textColor="@color/nocturne_text"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/tvModeChip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/pill_bg"
+            android:gravity="center"
+            android:padding="8dp"
+            android:text="@string/keypad_mode_persistent"
+            android:textColor="@color/nocturne_text_dim"
+            android:textSize="13sp" />
+
+        <!-- アプリ内通話中ピル (§3.2)。通話中のみ表示。タップで通話画面に戻る。 -->
+        <TextView
+            android:id="@+id/tvInCallPill"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/pill_call"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="10dp"
+            android:text="📞 00:00"
+            android:textColor="@color/nocturne_text"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- 余白はすべて上側へ。以下のキー群は画面下端に寄る。 -->
+    <Space
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <TextView
+        android:id="@+id/tvNumber"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="start"
+        android:gravity="center"
+        android:maxLines="1"
+        android:minHeight="52dp"
+        android:text=""
+        android:textColor="@color/nocturne_text"
+        android:textSize="40sp" />
+
+    <TextView
+        android:id="@+id/tvCaption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingBottom="12dp"
+        android:text="@string/keypad_hint_empty"
+        android:textColor="@color/nocturne_text_dim"
+        android:textSize="13sp" />
+
+    <GridLayout
+        android:id="@+id/keypadGrid"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:columnCount="3"
+        android:rowCount="4" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingTop="12dp">
+
+        <View
+            android:layout_width="72dp"
+            android:layout_height="1dp"
+            android:visibility="invisible" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnCall"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:contentDescription="@string/call_dial_desc"
+            android:insetLeft="0dp"
+            android:insetTop="0dp"
+            android:insetRight="0dp"
+            android:insetBottom="0dp"
+            app:cornerRadius="36dp"
+            app:icon="@drawable/ic_call"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            app:iconSize="30dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnBackToCall"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:text="@string/keypad_back_to_call"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnDelete"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:contentDescription="@string/call_delete_desc"
+            android:insetLeft="0dp"
+            android:insetTop="0dp"
+            android:insetRight="0dp"
+            android:insetBottom="0dp"
+            app:backgroundTint="@color/nocturne_surface_hi"
+            app:cornerRadius="36dp"
+            app:icon="@drawable/ic_backspace"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            app:iconSize="26dp"
+            app:iconTint="@color/nocturne_text"
+            app:strokeColor="@color/nocturne_border"
+            app:strokeWidth="1dp" />
+    </LinearLayout>
+</LinearLayout>
