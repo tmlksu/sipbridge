@@ -91,8 +91,7 @@ public ではなく `ops/` に置いてある。
 ```sh
 cd ~/Projects/sipbridge
 
-# 何をするか確認 (ドライラン)。AGENTS.md の「commit / push はしない」に従い、
-# エージェントは --apply を付けない。実行は人が行う。
+# 何をするか確認 (ドライラン)
 ops/split-repos.sh
 
 # 実行 (ガードが通ってから、下記を順に行う)
