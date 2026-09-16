@@ -1,0 +1,6 @@
+* New setting "hide the ongoing notification": moves it to a silent channel, with a shortcut to the channel settings if you want it gone entirely
+* New setup sheet that grants the missing permissions in one place (microphone, notifications, battery optimization, app hibernation, overlay, full-screen intent)
+* Daily check for settings that would stop incoming calls from arriving, with a notification when something is wrong
+* In PUSH mode the FCM token is now re-registered periodically, and you get a warning before the OS hibernates the app
+* Samsung devices show guidance for the "Never sleeping apps" list
+* Fixed incoming pushes not arriving right after a fresh install (gms build)

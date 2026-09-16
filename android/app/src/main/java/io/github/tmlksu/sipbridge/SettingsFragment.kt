@@ -1,15 +1,10 @@
 package io.github.tmlksu.sipbridge
 
 import android.Manifest
-import android.app.NotificationManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -17,6 +12,7 @@ import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,7 +55,15 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
     private lateinit var tvPermBattery: TextView
     private lateinit var tvPermNotification: TextView
     private lateinit var tvPermFullscreen: TextView
+    private lateinit var tvPermMic: TextView
+    private lateinit var tvPermHibernation: TextView
+    private lateinit var rowPermHibernation: View
+    private lateinit var tvSamsungGuide: TextView
     private lateinit var tvFooter: TextView
+    private lateinit var cardSetup: View
+    private lateinit var tvSetupTitle: TextView
+    private lateinit var tvSetupLines: TextView
+    private lateinit var swQuiet: SwitchMaterial
 
     /** Switch などのプログラム側 setChecked がリスナーを発火させないためのガード。 */
     private var binding = false
@@ -74,6 +78,15 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             val ctx = context ?: return@registerForActivityResult
             val cur = BridgeConfig.load(ctx)
             BridgeConfig.save(ctx, cur.copy(deviceContactsEnabled = granted))
+            refreshAll()
+        }
+
+    /**
+     * §6.4 権限カードの「マイク」「通知」行用の権限要求。結果に関わらず表示だけ更新する。
+     * 2 回拒否でダイアログが出なくなった場合は SetupSheet 側でアプリ情報画面へ誘導する。
+     */
+    private val requestRowPermission =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             refreshAll()
         }
 
@@ -116,7 +129,17 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         tvPermBattery = view.findViewById(R.id.tvPermBattery)
         tvPermNotification = view.findViewById(R.id.tvPermNotification)
         tvPermFullscreen = view.findViewById(R.id.tvPermFullscreen)
+        tvPermMic = view.findViewById(R.id.tvPermMic)
+        tvPermHibernation = view.findViewById(R.id.tvPermHibernation)
+        rowPermHibernation = view.findViewById(R.id.rowPermHibernation)
+        tvSamsungGuide = view.findViewById(R.id.tvSamsungGuide)
+        tvSamsungGuide.setOnClickListener { openAppDetails() }
         tvFooter = view.findViewById(R.id.tvFooter)
+        cardSetup = view.findViewById(R.id.cardSetup)
+        tvSetupTitle = view.findViewById(R.id.tvSetupTitle)
+        tvSetupLines = view.findViewById(R.id.tvSetupLines)
+        view.findViewById<View>(R.id.btnSetupOpen).setOnClickListener { openSetupSheet() }
+        swQuiet = view.findViewById(R.id.swQuiet)
 
         // スライダー範囲 0.5〜4.5 (0.1 刻み)
         sliderMicGain.valueFrom = 0.5f
@@ -154,10 +177,34 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             BridgeConfig.save(requireContext(), cur.copy(overlayEnabled = checked))
             // ON にした時点で権限が無ければそのまま許可画面へ (着信バブル・
             // 通話中ピルは権限が無いと一切出ないため、ここで気付けるようにする)
-            if (checked && !canDrawOverlays()) {
+            if (checked && !SystemStatus.canDrawOverlays(requireContext())) {
                 Toast.makeText(requireContext(), R.string.settings_overlay_warn, Toast.LENGTH_LONG).show()
                 openOverlaySetting()
             }
+            refreshAll()
+        }
+        swQuiet.setOnCheckedChangeListener { _, checked ->
+            if (binding) return@setOnCheckedChangeListener
+            val ctx = requireContext()
+            BridgeConfig.save(ctx, BridgeConfig.load(ctx).copy(serviceNotificationQuiet = checked))
+            // §6.5: Service 再起動なしで出し直す (停止中なら何もしない)。
+            if (BridgeService.running) runCatching {
+                val svc = Intent(ctx, BridgeService::class.java)
+                ctx.bindService(svc, object : android.content.ServiceConnection {
+                    override fun onServiceConnected(
+                        name: android.content.ComponentName?,
+                        binder: android.os.IBinder?
+                    ) {
+                        runCatching {
+                            (binder as? BridgeService.LocalBinder)?.service()
+                                ?.refreshServiceNotification()
+                        }
+                        runCatching { ctx.unbindService(this) }
+                    }
+                    override fun onServiceDisconnected(name: android.content.ComponentName?) = Unit
+                }, android.content.Context.BIND_AUTO_CREATE)
+            }
+            if (checked) showQuietDialog()
             refreshAll()
         }
         swSpeaker.setOnCheckedChangeListener { _, checked ->
@@ -205,6 +252,8 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         view.findViewById<View>(R.id.rowPermBattery).setOnClickListener { openBatterySetting() }
         view.findViewById<View>(R.id.rowPermNotification).setOnClickListener { openNotificationSetting() }
         view.findViewById<View>(R.id.rowPermFullscreen).setOnClickListener { openFullscreenSetting() }
+        view.findViewById<View>(R.id.rowPermMic).setOnClickListener { openMicSetting() }
+        view.findViewById<View>(R.id.rowPermHibernation).setOnClickListener { openHibernationSetting() }
 
         // テスト着信 (relay 無しで着信 UI を確認)
         view.findViewById<View>(R.id.btnTestIncoming).setOnClickListener {
@@ -280,8 +329,6 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             }
             swAutostart.isChecked = cfg.autostart
             swOverlay.isChecked = cfg.overlayEnabled
-            tvOverlayWarn.visibility =
-                if (cfg.overlayEnabled && !canDrawOverlays()) View.VISIBLE else View.GONE
             swSpeaker.isChecked = cfg.speakerOnAnswer
             // システム設定で権限を取り消されていたらトグルも OFF に戻す
             if (cfg.deviceContactsEnabled && !DeviceContacts.hasPermission(ctx)) {
@@ -295,14 +342,38 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             tvMicGain.text = getString(R.string.settings_gain, cfg.micGain)
             sliderMicGain.value = cfg.micGain.coerceIn(0.5f, 4.5f)
 
-            // 権限カード
-            tvPermOverlay.text = if (canDrawOverlays()) getString(R.string.settings_perm_allowed)
+            // §6.4 セットアップカード (不足が無ければ GONE)。
+            refreshSetupCard(ctx)
+
+            swQuiet.isChecked = cfg.serviceNotificationQuiet
+
+            // 権限カード (判定は SystemStatus に集約。ここでは値だけ見る)。
+            val sys = SystemStatus.read(ctx)
+            tvPermOverlay.text = if (sys.overlayGranted) getString(R.string.settings_perm_allowed)
             else getString(R.string.settings_perm_denied)
-            tvPermBattery.text = if (isBatteryExcluded()) getString(R.string.settings_perm_excluded)
+            tvPermBattery.text = if (sys.ignoringBatteryOptimizations) getString(R.string.settings_perm_excluded)
             else getString(R.string.settings_perm_not_excluded)
-            tvPermNotification.text = if (areNotificationsEnabled()) getString(R.string.settings_perm_allowed)
+            tvPermNotification.text = if (sys.notificationsEnabled) getString(R.string.settings_perm_allowed)
             else getString(R.string.settings_perm_denied)
-            tvPermFullscreen.text = fullscreenState(ctx)
+            tvPermFullscreen.text = when (sys.fullScreenIntentAllowed) {
+                true -> getString(R.string.settings_perm_allowed)
+                false -> getString(R.string.settings_perm_denied)
+                null -> getString(R.string.settings_perm_na)
+            }
+            tvPermMic.text = if (sys.micGranted) getString(R.string.settings_perm_allowed)
+            else getString(R.string.settings_perm_denied)
+            // 休止機能を持たない端末では行自体を出さない。
+            if (sys.hibernationExempt == null) {
+                rowPermHibernation.visibility = View.GONE
+            } else {
+                rowPermHibernation.visibility = View.VISIBLE
+                tvPermHibernation.text = if (sys.hibernationExempt) getString(R.string.settings_perm_allowed)
+                else getString(R.string.settings_perm_denied)
+            }
+            // Samsung 端末のみ One UI のスリープ案内 (§6.0 B は API では取れないため案内だけ)。
+            tvOverlayWarn.visibility =
+                if (cfg.overlayEnabled && !sys.overlayGranted) View.VISIBLE else View.GONE
+            tvSamsungGuide.visibility = if (sys.isSamsung) View.VISIBLE else View.GONE
 
             // フッター: アプリ版 / relay 版 / device id (先頭 8 桁)
             val appVer = runCatching {
@@ -455,57 +526,24 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         }
     }
 
-    // ---- 権限の状態と導線 (旧 MainActivity の 2 つ + 通知/全画面を追加) ----
-
-    private fun canDrawOverlays(): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(requireContext())
-        else true
+    // ---- 権限の導線 (§6.1)。判定は SystemStatus に集約し、ここでは候補の起動だけ行う ----
 
     private fun openOverlaySetting() {
         val ctx = requireContext()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(ctx)) {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}")))
-        } else {
+        if (SystemStatus.canDrawOverlays(ctx)) {
             Toast.makeText(ctx, R.string.settings_perm_overlay_ok, Toast.LENGTH_SHORT).show()
+        } else if (!SystemStatus.startFirstResolvable(ctx, SystemStatus.overlayIntent(ctx))) {
+            Toast.makeText(ctx, R.string.setup_open_fail, Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun isBatteryExcluded(): Boolean {
-        val pm = requireContext().getSystemService(Context.POWER_SERVICE) as PowerManager
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
-            pm.isIgnoringBatteryOptimizations(requireContext().packageName)
     }
 
     private fun openBatterySetting() {
         val ctx = requireContext()
-        try {
-            val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-                !pm.isIgnoringBatteryOptimizations(ctx.packageName)
-            ) {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:${ctx.packageName}")
-                    )
-                )
-            } else {
-                Toast.makeText(ctx, R.string.settings_perm_battery_ok, Toast.LENGTH_SHORT).show()
-            }
-        } catch (e: Exception) {
-            Toast.makeText(ctx, ctx.getString(R.string.common_open_settings_fail, e.message), Toast.LENGTH_SHORT).show()
+        if (SystemStatus.isBatteryExcluded(ctx)) {
+            Toast.makeText(ctx, R.string.settings_perm_battery_ok, Toast.LENGTH_SHORT).show()
+        } else if (!SystemStatus.startFirstResolvable(ctx, SystemStatus.batteryIntents(ctx))) {
+            Toast.makeText(ctx, R.string.setup_open_fail, Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun areNotificationsEnabled(): Boolean {
-        val ctx = requireContext()
-        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (!nm.areNotificationsEnabled()) return false
-        if (Build.VERSION.SDK_INT >= 33) {
-            return ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
-                PackageManager.PERMISSION_GRANTED
-        }
-        return true
     }
 
     private fun openNotificationSetting() {
@@ -515,23 +553,12 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 12)
+            requestRowPermission.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
             return
         }
-        try {
-            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
-            })
-        } catch (e: Exception) {
-            Toast.makeText(ctx, ctx.getString(R.string.common_open_settings_fail, e.message), Toast.LENGTH_SHORT).show()
+        if (!SystemStatus.startFirstResolvable(ctx, SystemStatus.notificationSettingsIntent(ctx))) {
+            Toast.makeText(ctx, R.string.setup_open_fail, Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun fullscreenState(ctx: Context): String {
-        if (Build.VERSION.SDK_INT < 34) return ctx.getString(R.string.settings_perm_na)
-        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        return if (nm.canUseFullScreenIntent()) ctx.getString(R.string.settings_perm_allowed)
-        else ctx.getString(R.string.settings_perm_denied)
     }
 
     private fun openFullscreenSetting() {
@@ -540,14 +567,79 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             Toast.makeText(ctx, R.string.settings_perm_fullscreen_na, Toast.LENGTH_SHORT).show()
             return
         }
-        try {
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
-                    data = Uri.parse("package:${ctx.packageName}")
-                }
-            )
-        } catch (e: Exception) {
-            Toast.makeText(ctx, ctx.getString(R.string.common_open_settings_fail, e.message), Toast.LENGTH_SHORT).show()
+        if (!SystemStatus.startFirstResolvable(ctx, SystemStatus.fullscreenIntent(ctx))) {
+            Toast.makeText(ctx, R.string.setup_open_fail, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /** §6.4 権限カードの「マイク」行: その場で要求し、結果は表示に反映するだけ。 */
+    private fun openMicSetting() {
+        val ctx = requireContext()
+        if (SystemStatus.hasPermission(ctx, Manifest.permission.RECORD_AUDIO)) {
+            Toast.makeText(ctx, R.string.settings_perm_mic_ok, Toast.LENGTH_SHORT).show()
+            return
+        }
+        requestRowPermission.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+    }
+
+    /** §6.4 権限カードの「アプリの休止を無効化」行。 */
+    private fun openHibernationSetting() {
+        val ctx = requireContext()
+        if (!SystemStatus.startFirstResolvable(ctx, SystemStatus.hibernationIntents(ctx))) {
+            Toast.makeText(ctx, R.string.setup_open_fail, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openAppDetails() {
+        val ctx = requireContext()
+        SystemStatus.startFirstResolvable(ctx, listOf(SystemStatus.appDetailsIntent(ctx)))
+    }
+
+    // ---- セットアップカード (§6.4) ----
+
+    /**
+     * [PushHealth.evaluate] の不足のうち SetupSheet で対処できるものだけを
+     * 「あと N 件 + 最大 3 行」で出す。対処できるものが無ければ GONE
+     * (PUSH_TOKEN_MISSING / PUSH_REGISTRATION_STALE はシートに項目が無いため数えない)。
+     */
+    private fun refreshSetupCard(ctx: android.content.Context) {
+        val issues = PushHealth.evaluate(System.currentTimeMillis(), PushHealth.buildSnapshot(ctx))
+            .filter { PushHealth.isActionable(it.kind) }
+        if (issues.isEmpty()) {
+            cardSetup.visibility = View.GONE
+            return
+        }
+        cardSetup.visibility = View.VISIBLE
+        tvSetupTitle.text = getString(R.string.setup_card_title, issues.size)
+        tvSetupLines.text = issues.take(3)
+            .joinToString("\n") { HealthCheckReceiver.reasonText(ctx, it.kind) }
+    }
+
+    private fun openSetupSheet() {
+        runCatching {
+            SetupSheet().show(parentFragmentManager, TAG_SETUP_SHEET)
+        }
+    }
+
+    // ---- 常駐通知の静音化 (§6.5) ----
+
+    /** トグル ON 直後の案内: チャンネル OFF への導線 + 着信は別チャンネルである旨。 */
+    private fun showQuietDialog() {
+        val ctx = requireContext()
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.settings_quiet_dialog_title)
+            .setMessage(R.string.settings_quiet_dialog_msg)
+            .setPositiveButton(R.string.settings_quiet_dialog_open) { _, _ ->
+                SystemStatus.startFirstResolvable(
+                    ctx,
+                    SystemStatus.channelSettingsIntent(ctx, NotificationHelper.CH_SERVICE_QUIET)
+                )
+            }
+            .setNegativeButton(R.string.common_close, null)
+            .show()
+    }
+
+    companion object {
+        private const val TAG_SETUP_SHEET = "setup_sheet"
     }
 }

@@ -622,6 +622,7 @@ func (c *Conn) handleText(data []byte) {
 			c.sendError("store_failed", "push 登録の保存に失敗")
 			return
 		}
+		c.hub.log.Info("push 登録", "device", c.deviceID, "provider", m.Provider)
 	case *proto.SipAccount:
 		code, message := c.hub.bindAccount(c, m.User, m.Password, m.Display)
 		if code != "" {

@@ -40,6 +40,8 @@ class BridgeMessagingService : FirebaseMessagingService() {
         }
         val caller = data["caller"] ?: data["from"]
         Log.i(TAG, "着信 push 受信: callId=${data["callId"]} from=$caller")
+        // §6.2 到達性の記録: push が届いた時刻。
+        PushHealth.markPushReceived(this)
         // bind 失敗などで届いていないトークンがあれば、この機会に再配送する。
         lastToken()?.let { deliverToken(it) }
         val wake = Intent(this, BridgeService::class.java).apply {

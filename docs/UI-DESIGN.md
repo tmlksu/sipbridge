@@ -1,4 +1,4 @@
-# SIP Bridge アプリ UI 設計 (v1.2) — `docs/design/android-app-design.pdf` の文章化
+# SIP Bridge アプリ UI 設計 (v1.4) — `docs/design/android-app-design.pdf` の文章化
 
 作成: 2026-09-16。原本は Claude Design のアートボード 4 枚 (Galaxy S25 縦)。
 実装対象は Android アプリ (`android/`)。**Echo Show 5 (960×480 横, API 30) でも崩れないこと**が
@@ -222,3 +222,136 @@ Echo Show 5 は利用可能高さが 321dp しかなく、下にナビを置く�
   (`adb shell am broadcast -a io.github.tmlksu.sipbridge.DEBUG_SET_CONFIG --es relayUrl ... --es sipUser ...`)。
   Echo Show など入力しづらい端末の初期設定用。release には含めない (`src/debug` 配下 + debug manifest)。
 - 旧 `MainActivity` の 1 画面設定 UI と `activity_main.xml` は廃止。`activity_incoming.xml` も置換。
+
+---
+
+## 6. 到達性とセットアップ (v1.4)
+
+「着信が届く状態か」を **OS 設定も含めて** アプリが把握し、崩れていれば直す導線を出す。
+対象は `android/` のみ (relay は変更しない)。
+
+### 6.0 前提 — Push が届かなくなる原因 (調査結果)
+
+FCM トークンに「一定期間起動しないと失効する」固定の期限は無い。実際に届かなくなるのは次:
+
+| # | 原因 | 検知 | 対処 |
+|---|---|---|---|
+| A | **未使用アプリの休止** (API 31+ / 権限の自動リセットは API 30+)。数か月使われないと強制停止され、権限が取り消され、**FCM も届かなくなる** | `PackageManager.isAutoRevokeWhitelisted()` (API 30+) | 休止の除外をユーザーに設定してもらう。除外できていないときは**休止が起きる前に**予告通知 |
+| B | **One UI の「スリープ状態のアプリ」**。S25 で数日使わないと寝かされ、push が遅延/不達 | API では取れない | Samsung 端末でだけ案内行を出し、アプリ情報画面へ誘導 |
+| C | **電池の最適化**が有効 | `PowerManager.isIgnoringBatteryOptimizations()` | 除外を要求 (§6.3) |
+| D | **通知が無効** (POST_NOTIFICATIONS 拒否 / チャンネル OFF) | `areNotificationsEnabled()` + 権限 + `getNotificationChannel(CH_INCOMING).importance` | 要求 / 設定へ誘導 |
+| E | **強制停止**・データ消去・再インストール直後で `register_push` 未送信 | `PushHealth.lastPushRegisteredAt` が古い / 無い | 定期再登録 + 予告通知 |
+| F | relay 側でトークンが無効化された (FCM が `UNREGISTERED` を返し relay が削除) | アプリ側からは見えない | 定期再登録で自動復旧する |
+
+→ 「失効の予告」は **A と E に対する事前通知** として実装する。B/C/D は状態表示と導線で潰す。
+
+### 6.1 `SystemStatus` (新規) — OS 状態のスナップショット
+
+`PrefixDialer` の `SystemStatus.kt` と同じ方針: **Android API の呼び出しをこのファイルに閉じ込め**、
+UI は値だけを見る。`read(context)` が返す `data class`:
+
+`micGranted` / `notificationsEnabled` (権限 + `areNotificationsEnabled` + 着信チャンネルが OFF でない) /
+`overlayGranted` / `fullScreenIntentAllowed` (API 34+) / `ignoringBatteryOptimizations` /
+`hibernationExempt` (`isAutoRevokeWhitelisted`。API 30 未満と、機能を持たない端末では `null` = 非対応) /
+`pushTokenPresent` (gms かつ `FCM_PREFS` にトークンがある) / `isSamsung` (`Build.MANUFACTURER`)。
+
+Intent の候補は **リストで返し、先頭から `resolveActivity` が通るものを起動する** (PrefixDialer と同じ):
+
+- 電池: `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (本アプリは Play 配布ではなく
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` を宣言済みなのでダイアログが出せる) →
+  `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS` → `ACTION_APPLICATION_DETAILS_SETTINGS`。
+  **PrefixDialer の教訓**: 権限未宣言だと `ACTION_REQUEST_...` は Galaxy S25 で**無反応**になる。
+  宣言済みでも端末によっては解決できないため、フォールバックを必ず持つ。
+- 休止除外: `Intent.ACTION_AUTO_REVOKE_PERMISSIONS` (API 30+, `package:` URI) →
+  `ACTION_APPLICATION_DETAILS_SETTINGS`。
+- チャンネル個別: `Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS` (+ `EXTRA_CHANNEL_ID`)。
+
+### 6.2 `PushHealth` (新規) — 到達性の履歴と判定
+
+平文 SharedPreferences `sipbridge_health` に epoch millis を記録する (秘密を含まないため暗号化不要):
+
+- `lastUserOpenAt`: `MainActivity.onResume` (= OS から見た「使用」)
+- `lastPushRegisteredAt`: `register_push` を送って `hello` まで到達したとき (`BridgeService`)
+- `lastPushReceivedAt`: gms の `BridgeMessagingService.onMessageReceived`
+- `lastRelayOkAt`: `hello` 受信
+- `lastWarnAt` / `lastWarnKind`: 通知の重複抑止
+
+判定は **純関数** `PushHealth.evaluate(now: Long, s: Snapshot): List<Issue>` に切り出す
+(Android 非依存。JVM テスト対象)。`Issue` は `kind` (enum) + 重要度 `BLOCKING` / `WARN`:
+
+| kind | 条件 | 重要度 |
+|---|---|---|
+| `NOTIFICATIONS_OFF` | 通知が無効 | BLOCKING |
+| `MIC_DENIED` | RECORD_AUDIO 未許可 | BLOCKING |
+| `PUSH_TOKEN_MISSING` | PUSH モード + gms + トークン無し | BLOCKING |
+| `PUSH_REGISTRATION_STALE` | PUSH モード + `now - lastPushRegisteredAt > 14 日` (未登録も含む) | WARN |
+| `HIBERNATION_SOON` | 休止除外されていない + `now - lastUserOpenAt > 45 日` | WARN |
+| `BATTERY_OPTIMIZED` | 電池最適化の除外なし | WARN |
+| `OVERLAY_DENIED` | オーバーレイ ON 設定なのに権限なし | WARN |
+| `FULLSCREEN_DENIED` | API 34+ で全画面通知が不可 | WARN |
+
+### 6.3 定期チェック — `HealthCheckReceiver` (新規)
+
+`BridgeService.onCreate` と `BootReceiver` から `AlarmManager.setInexactRepeating(RTC_WAKEUP,
+初回 = now + 1 日, INTERVAL_DAY, …)` で 1 日 1 回。**exact alarm は使わない** (権限が要る)。
+
+発火時:
+1. **PUSH モードで `lastPushRegisteredAt` が 7 日以上前**なら `BridgeService` を起こして
+   再接続 → `register_push` を送り直す (成功すれば relay 側のトークンも新しくなる。§6.0 の E/F 対策)。
+   ※ 再登録のためだけの接続は既存の idle 猶予で自動切断される。
+2. `evaluate` して BLOCKING または WARN があれば**通知を 1 本**出す
+   (新チャンネル `sipbridge_health`, IMPORTANCE_DEFAULT, `ongoing=false`,
+   タップで `MainActivity` の設定タブ)。文言:
+   - BLOCKING あり: 「着信を受けられない設定があります」/ 本文 = 先頭の理由
+   - `HIBERNATION_SOON`: 「しばらくアプリが使われていません」/
+     「このままだと OS がアプリを休止させ、着信 push が届かなくなります。タップして開いてください」
+   - それ以外: 「着信の設定を確認してください」/ 本文 = 理由の列挙 (最大 2 件)
+3. **同じ `kind` の通知は 3 日に 1 回まで** (`lastWarnAt` / `lastWarnKind`)。全部解消したら
+   通知をキャンセルする。
+
+> 休止済みのアプリではアラームも発火しない。だからこの通知は「**休止する前に**気付かせる」ためのもの。
+> 恒久対策は §6.4 の休止除外トグルであり、通知本文でもそこへ誘導する。
+
+### 6.4 設定 §1.4 の変更
+
+**「セットアップ」カードを状態カードの直下に追加** (不足が無いときは非表示):
+「あと N 件の設定が必要です」+ 不足項目を最大 3 行 + ボタン「まとめて設定」。
+押すと `SetupSheet` (`BottomSheetDialogFragment`) を開く。
+
+`SetupSheet`: 項目を一覧し、行ごとに状態バッジ (必須/推奨/許可済み) と「許可」ボタン:
+マイク → 通知 → 電池の最適化 → 休止の除外 → オーバーレイ → 全画面通知 の順。
+ランタイム権限 (`RECORD_AUDIO` / `POST_NOTIFICATIONS`) は `registerForActivityResult`
+(`RequestMultiplePermissions`) でその場のダイアログ。2 回拒否されて
+`shouldShowRequestPermissionRationale` が false のときだけアプリ情報画面へ誘導する。
+特別なアクセスは §6.1 の Intent 候補で開き、**戻ってきたら再判定して行を更新**する
+(遷移しなかった場合に備え、状態が変わらなければ次の候補を案内する)。
+
+`SetupSheet` は次のときに自動で出す: **初回起動時** (`lastSetupShownAt` 未設定)、
+および **BLOCKING な不足があるとき** (1 日 1 回まで)。`MainActivity.onResume` から判定する。
+
+**権限カードの行を追加**: 「マイク」「アプリの休止を無効化 (API 30+、非対応端末では出さない)」。
+Samsung 端末でだけ最下部に案内行「Samsung: 設定 → バッテリー → バックグラウンド使用制限 →
+『スリープ状態にしないアプリ』に追加」(タップでアプリ情報画面)。
+
+**動作カードにトグル「常駐通知を隠す」を追加** (既定 OFF)。→ §6.5。
+
+### 6.5 常駐通知の表示スタイル
+
+FGS の通知はアプリ側からは消せない (API 26+ の仕様)。そこで 2 段構えにする:
+
+1. 設定 `serviceNotificationQuiet` (既定 OFF) が ON のとき、常駐通知を
+   **`CH_SERVICE_QUIET = "sipbridge_service_quiet"` (IMPORTANCE_MIN)** に出す。
+   併せて `setSilent(true)` / `setShowWhen(false)` / `PRIORITY_MIN`。
+   ステータスバーのアイコンが消え、通知シェードの最下部に折りたたまれる。
+   **チャンネルの importance は作成後に変更できない**ため、通常用と静音用の
+   2 チャンネルを持ち、`startForeground(ID_SERVICE, …)` を出し直して切り替える
+   (設定変更時に `BridgeService` へ反映。Service の再起動はしない)。
+2. トグル ON の直後にダイアログで案内: 「完全に非表示にするには、通知設定で
+   『常駐サービス (静音)』をオフにしてください」+ ボタン「通知設定を開く」
+   (`ACTION_CHANNEL_NOTIFICATION_SETTINGS`)。
+   **着信通知は別チャンネル (`sipbridge_incoming`) なので影響しない**ことを併記する。
+   チャンネルを OFF にしても Service は動き続ける (Android 12+ では
+   「実行中のアプリ」からは見える)。
+
+権限カードの「通知」行の状態は、**着信チャンネルが生きているか**で判定する
+(常駐チャンネルを意図的に切った状態を「未許可」と表示しないため)。

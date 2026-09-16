@@ -33,6 +33,11 @@ class BridgeService : Service(), RelayClient.Listener {
         /** T5 (FCM) が着信起床で送る。現時点では CONNECT と同等。 */
         const val ACT_WAKE_INCOMING = "sipbridge.WAKE_INCOMING"
         const val ACT_STOP = "sipbridge.STOP"
+        /** §6.3 手順 1: 7 日ごとの push 再登録。PUSH モードのときだけ再接続して register_push を送り直す。
+         *  HealthCheckReceiver が needsReregister == true のときに送る。
+         *  同一プロセスで登録済みでも [registeredPushToken] を null に戻してから接続するため、
+         *  restorePushToken() が null を返して何もしない (＝再登録が永久に実行されない) 不具合を避ける。 */
+        const val ACT_REREGISTER_PUSH = "sipbridge.REREGISTER_PUSH"
         const val ACT_UI_SHOWN = "sipbridge.UI_SHOWN"
         const val ACT_UI_HIDDEN = "sipbridge.UI_HIDDEN"
         const val EXTRA_TO = "to"
@@ -40,10 +45,10 @@ class BridgeService : Service(), RelayClient.Listener {
         /** PUSH モードで通話終了後に切断するまでの猶予。 */
         const val PUSH_IDLE_DISCONNECT_MS = 60_000L
 
-        // gms flavor の BridgeMessagingService が保存する FCM トークン。
+        // gms flavor の BridgeMessagingService / GmsApplication が保存する FCM トークン。
         // (foss では該当 prefs が存在しないため常に null で無害)
-        private const val FCM_PREFS = "sipbridge_gms"
-        private const val FCM_TOKEN_KEY = "last_fcm_token"
+        internal const val FCM_PREFS = "sipbridge_gms"
+        internal const val FCM_TOKEN_KEY = "last_fcm_token"
 
         /** Service が生きているか (設定画面の開始/停止表示・再接続判定に使う)。 */
         @Volatile
@@ -52,6 +57,13 @@ class BridgeService : Service(), RelayClient.Listener {
 
         fun start(ctx: Context) {
             val i = Intent(ctx, BridgeService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
+            else ctx.startService(i)
+        }
+
+        /** §6.3 手順 1 用の起動 ([ACT_REREGISTER_PUSH] を付けて起こす)。 */
+        fun startReregister(ctx: Context) {
+            val i = Intent(ctx, BridgeService::class.java).setAction(ACT_REREGISTER_PUSH)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
             else ctx.startService(i)
         }
@@ -97,13 +109,16 @@ class BridgeService : Service(), RelayClient.Listener {
         super.onCreate()
         running = true
         NotificationHelper.ensureChannels(this)
+        // §6.3 定期チェックの登録 (Service 生成のたびに。重複登録は上書きされるだけ)。
+        HealthCheckReceiver.schedule(this)
         // API 31+: バックグラウンドからの bind (FCM onNewToken 経由など) では
         // ForegroundServiceStartNotAllowedException になり得るため保護する。
         runCatching {
+            val cfg0 = BridgeConfig.load(this)
             startForeground(
                 NotificationHelper.ID_SERVICE,
                 NotificationHelper.serviceNotification(
-                    this, BridgeConfig.load(this).mode == BridgeMode.PUSH, ""
+                    this, cfg0.mode == BridgeMode.PUSH, "", cfg0.serviceNotificationQuiet
                 )
             )
         }.onFailure { Log.w(TAG, "startForeground failed (background start?)", it) }
@@ -171,7 +186,13 @@ class BridgeService : Service(), RelayClient.Listener {
             // 未登録の FCM トークンを保持しているときだけ接続して register_push を
             // 済ませる (hello 後は idle 猶予で自動切断)。本プロセスで登録済みの
             // トークンしか無い場合は接続しない。
-            if (restorePushToken() != null) ensureConnected()
+            if (restorePushToken() != null) {
+                ensureConnected()
+            } else if (BuildConfig.FLAVOR == "gms") {
+                // トークンは GmsApplication が取得する (取得でき次第 setPushToken が呼ばれ、
+                // そこで接続して register_push を送る)。
+                Log.w(TAG, "FCM トークン未取得 (register_push は取得後に送る)")
+            }
         }
     }
 
@@ -219,6 +240,15 @@ class BridgeService : Service(), RelayClient.Listener {
             ACT_HANGUP -> hangupFromAnywhere()
             ACT_DIAL -> dialFromAnywhere(intent.getStringExtra(EXTRA_TO).orEmpty())
             ACT_CONNECT, ACT_WAKE_INCOMING -> ensureConnected()
+            ACT_REREGISTER_PUSH -> {
+                // PUSH モードのときだけ、登録済みトークンを捨てて接続し直す (register_push 再送)。
+                // PERSISTENT は何もしない。再登録のためだけの接続は既存の idle 猶予で自動切断される。
+                if (BridgeConfig.load(this).mode == BridgeMode.PUSH) {
+                    registeredPushToken = null
+                    restorePushToken()
+                    ensureConnected()
+                }
+            }
             ACT_UI_SHOWN -> onCallUiShown()
             ACT_UI_HIDDEN -> onCallUiHidden()
             ACT_STOP -> {
@@ -229,6 +259,9 @@ class BridgeService : Service(), RelayClient.Listener {
                 // 通常起動: PERSISTENT なら接続を確保する
                 if (client == null) ensureClient()
                 else if (BridgeConfig.load(this).mode == BridgeMode.PERSISTENT) ensureConnected()
+                // PUSH: サービスが生きている状態で未登録のトークンが届いた場合
+                // (GmsApplication の取得完了がサービス起動より遅れたとき) も登録のため接続する。
+                else if (restorePushToken() != null) ensureConnected()
             }
         }
         return START_STICKY
@@ -257,10 +290,24 @@ class BridgeService : Service(), RelayClient.Listener {
         runCatching {
             nm.notify(
                 NotificationHelper.ID_SERVICE,
-                NotificationHelper.serviceNotification(this, pushIdle, CallHub.extension)
+                NotificationHelper.serviceNotification(
+                    this, pushIdle, CallHub.extension, cfg.serviceNotificationQuiet
+                )
             )
         }
     }
+
+    /**
+     * §6.5「常駐通知を隠す」の切り替えを反映する。`startForeground` を出し直すだけで、
+     * Service の再起動はしない (チャンネルは通常用と静音用の 2 つを持ち、出し直しで切替)。
+     */
+    fun refreshServiceNotification() {
+        if (!running) return
+        updateServiceNote()
+    }
+
+    /** 常駐通知の静音フラグ (通話中ピル代替の通知にも適用)。 */
+    private fun serviceQuiet(): Boolean = BridgeConfig.load(this).serviceNotificationQuiet
 
     // ---- RelayClient.Listener (OkHttp スレッドで呼ばれる) ----
 
@@ -279,6 +326,8 @@ class BridgeService : Service(), RelayClient.Listener {
                 client?.sendSipAccount(cfg.sipUser, cfg.sipPassword, cfg.sipDisplay)
             }
         }
+        // §6.2 到達性の記録: hello 到達 = relay 到達。
+        PushHealth.markRelayOk(this)
         // 保留トークン (T5) があれば登録する
         var tokenRegistered = false
         pendingPushToken?.let { token ->
@@ -286,6 +335,8 @@ class BridgeService : Service(), RelayClient.Listener {
             client?.registerPush("fcm", token)
             registeredPushToken = token
             tokenRegistered = true
+            // §6.2: register_push を送って hello まで到達した = 登録完了。
+            PushHealth.markPushRegistered(this)
         }
         if (v.call == null) {
             pendingDial?.let { dest ->
@@ -662,7 +713,7 @@ class BridgeService : Service(), RelayClient.Listener {
                 (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
                     .notify(
                         NotificationHelper.ID_SERVICE,
-                        NotificationHelper.outgoingNotification(this, CallHub.from)
+                        NotificationHelper.outgoingNotification(this, CallHub.from, serviceQuiet())
                     )
             }
         } else {
@@ -673,7 +724,7 @@ class BridgeService : Service(), RelayClient.Listener {
                     val s = ((System.currentTimeMillis() - CallHub.callStartedAt) / 1000).toInt().coerceAtLeast(0)
                     runCatching {
                         (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
-                            .notify(NotificationHelper.ID_SERVICE, NotificationHelper.inCallNotification(this@BridgeService, s))
+                            .notify(NotificationHelper.ID_SERVICE, NotificationHelper.inCallNotification(this@BridgeService, s, serviceQuiet()))
                     }
                     inCallNotifyTick = this
                     mainHandler.postDelayed(this, 1000)
@@ -832,7 +883,14 @@ class BridgeService : Service(), RelayClient.Listener {
             pendingPushToken = null
             client?.registerPush("fcm", token)
             registeredPushToken = token
+            return
         }
+        // サービス起動後にトークンが届いた (onNewToken / GmsApplication の取得完了)。
+        // PUSH モードの待機中は接続していないため、register_push を送るためだけに
+        // 一度接続する。以前はここで接続せず、UI を開くか着信するまで relay に
+        // 登録されなかった (新規インストール直後に push が届かない不具合)。
+        Log.i(TAG, "FCM トークン到着 (未接続)。register_push のため接続する")
+        ensureConnected()
     }
 
     private fun schedulePushDisconnect() {
