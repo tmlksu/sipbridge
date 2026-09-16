@@ -5,7 +5,7 @@ sipbridge の Android 側。EchoSIP standby v1.5 (自前 SIP/RTP スタック) �
 WebSocket クライアント + Nocturne UI (`docs/UI-DESIGN.md`) に作り替えたもの。
 プロトコルは `docs/PROTOCOL.md` v1.1 (`sip_account`, `hello.account`, 発信 `dial`)。
 
-- package / applicationId: `net.peyan.sipbridge` (旧 EchoSIP と共存可)
+- package / applicationId: `io.github.tmlksu.sipbridge` (旧 EchoSIP と共存可)
 - アプリ名: 「SIP Bridge」。`rootProject.name = "SipBridge"`
 - versionCode 2 / versionName 1.1
 - 端末側で LISTEN するポートはゼロ (`DatagramSocket` 禁止。CI で grep 検査)
@@ -95,7 +95,7 @@ WebSocket クライアント + Nocturne UI (`docs/UI-DESIGN.md`) に作り替え
 
 ## 4. クラス一覧
 
-`app/src/main/java/net/peyan/sipbridge/` (package `net.peyan.sipbridge`)。
+`app/src/main/java/io/github/tmlksu/sipbridge/` (package `io.github.tmlksu.sipbridge`)。
 
 | クラス/ファイル | 種別 | 役割 |
 |---|---|---|
@@ -227,7 +227,7 @@ WebSocket クライアント + Nocturne UI (`docs/UI-DESIGN.md`) に作り替え
 ## 10. debug 専用 receiver (`DebugConfigReceiver`)
 
 - `src/debug` 配下 + debug manifest の receiver のため **release には含まれない**。
-- `adb shell am broadcast -a net.peyan.sipbridge.DEBUG_SET_CONFIG` で設定投入
+- `adb shell am broadcast -a io.github.tmlksu.sipbridge.DEBUG_SET_CONFIG` で設定投入
   (Echo Show など入力しづらい端末用。詳細は `INSTALL.md` と `scripts/adb-setup.sh`)。
 - `DEBUG_CALL_ACTION` (action=answer|reject|hangup|dial, to=番号) で通話操作
   (E2E スクリプト用)。

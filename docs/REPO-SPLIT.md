@@ -123,7 +123,7 @@ ops/split-repos.sh --apply
 
 ### F-Droid へ提出
 
-`fdroid/net.peyan.sipbridge.yml` を fdroiddata へ MR する。`SourceCode` と
+`fdroid/io.github.tmlksu.sipbridge.yml` を fdroiddata へ MR する。`SourceCode` と
 `commit: v1.2` は上記 public リポジトリを指す。
 
 ### コミット前の検査

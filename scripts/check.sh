@@ -51,6 +51,20 @@ check_android() {
   if grep -r "DatagramSocket" app/src >/dev/null 2>&1; then
     echo "NG: DatagramSocket が残っている"; grep -rn "DatagramSocket" app/src; return 1
   fi
+  # google-services.json は Firebase コンソールでパッケージ名ごとに発行される。
+  # applicationId を変えたあと古い json を置いたままだと、gms のビルドが
+  # "No matching client found for package name" で落ちる。原因を先に名指ししておく。
+  local appid gsj
+  appid="$(sed -n 's/.*applicationId = "\([^"]*\)".*/\1/p' app/build.gradle | head -1)"
+  for gsj in app/google-services.json app/src/gms/google-services.json; do
+    [[ -f "$gsj" ]] || continue
+    if ! grep -q "\"package_name\": *\"$appid\"" "$gsj"; then
+      echo "NG: $gsj のパッケージ名が applicationId ($appid) と一致しない。"
+      echo "    Firebase コンソールで $appid の Android アプリを追加し、json を取り直すこと"
+      echo "    (docs/SETUP.md §6-1)。"
+      return 1
+    fi
+  done
   "$HOME/android-build/gradle-8.9/bin/gradle" :app:assembleFossDebug :app:assembleGmsDebug \
     :app:testFossDebugUnitTest --no-daemon -q 2>&1 | grep -v "^$" | tail -n 40
   ls -la app/build/outputs/apk/foss/debug/app-foss-debug.apk app/build/outputs/apk/gms/debug/app-gms-debug.apk

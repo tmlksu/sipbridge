@@ -10,7 +10,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERIAL="${1:?serial}"; FLAVOR="${2:?foss|gms}"; shift 2
-PKG="net.peyan.sipbridge"
+PKG="io.github.tmlksu.sipbridge"
 INSTALL=1
 KV=()
 for a in "$@"; do
@@ -24,6 +24,12 @@ done
 APK="$ROOT/android/app/build/outputs/apk/$FLAVOR/debug/app-$FLAVOR-debug.apk"
 if [[ "$INSTALL" == 1 ]]; then
   [[ -f "$APK" ]] || { echo "APK が無い: $APK (scripts/check.sh android を先に)"; exit 1; }
+  # v1.2 以前の applicationId。ID が変わったので上書き更新はできない。
+  # 消すかどうかは設定が消える判断なので、ここでは知らせるだけにする。
+  if adb -s "$SERIAL" shell pm list packages | grep -q "^package:net.peyan.sipbridge$"; then
+    echo "注意: 旧 ID の net.peyan.sipbridge が入っている。別アプリとして併存する。"
+    echo "      不要なら: adb -s $SERIAL uninstall net.peyan.sipbridge"
+  fi
   echo "== install $APK → $SERIAL"
   adb -s "$SERIAL" install -r -g "$APK"
   echo "== permissions"
