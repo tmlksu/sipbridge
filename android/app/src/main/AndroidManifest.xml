@@ -25,6 +25,22 @@
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
+    <!-- API 30+: resolveActivity の可視性確保 (§6.1 休止除外の対応判定用)。
+         minSdk 29 では無視される。 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.AUTO_REVOKE_PERMISSIONS" />
+            <data android:scheme="package" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+            <data android:scheme="package" />
+        </intent>
+    </queries>
+
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -65,6 +81,11 @@
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- §6.3 1 日 1 回の定期チェック (AlarmManager.setInexactRepeating)。 -->
+        <receiver
+            android:name=".HealthCheckReceiver"
+            android:exported="false" />
 
     </application>
 </manifest>

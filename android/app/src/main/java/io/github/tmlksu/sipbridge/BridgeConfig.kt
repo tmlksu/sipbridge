@@ -29,6 +29,8 @@ data class BridgeConfigData(
     val speakerOnAnswer: Boolean = false,
     /** 端末の連絡先を連絡先タブに混ぜて表示する (既定 OFF。ON で READ_CONTACTS を要求)。 */
     val deviceContactsEnabled: Boolean = false,
+    /** §6.5 常駐通知を静音チャンネルに出す (既定 OFF)。着信チャンネルは影響を受けない。 */
+    val serviceNotificationQuiet: Boolean = false,
     /** relay の X-Device-Id。初回生成し端末に固定。 */
     val deviceId: String = ""
 )
@@ -69,6 +71,7 @@ object BridgeConfig {
             sipDisplay = p.getString("sipDisplay", "") ?: "",
             speakerOnAnswer = p.getBoolean("speakerOnAnswer", false),
             deviceContactsEnabled = p.getBoolean("deviceContactsEnabled", false),
+            serviceNotificationQuiet = p.getBoolean("serviceNotificationQuiet", false),
             deviceId = deviceId
         )
     }
@@ -90,6 +93,7 @@ object BridgeConfig {
             .putString("sipDisplay", d.sipDisplay.trim())
             .putBoolean("speakerOnAnswer", d.speakerOnAnswer)
             .putBoolean("deviceContactsEnabled", d.deviceContactsEnabled)
+            .putBoolean("serviceNotificationQuiet", d.serviceNotificationQuiet)
             .putString("deviceId", keepId.ifBlank { UUID.randomUUID().toString() })
             .apply()
     }

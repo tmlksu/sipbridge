@@ -11,9 +11,14 @@ import androidx.core.app.NotificationCompat
 
 object NotificationHelper {
     const val CH_SERVICE = "sipbridge_service"
+    /** §6.5 静音用の常駐通知チャンネル (IMPORTANCE_MIN)。作成後の importance は変えられないため別保持。 */
+    const val CH_SERVICE_QUIET = "sipbridge_service_quiet"
     const val CH_INCOMING = "sipbridge_incoming"
+    /** §6.3 定期チェックの警告通知チャンネル (IMPORTANCE_DEFAULT)。 */
+    const val CH_HEALTH = "sipbridge_health"
     const val ID_SERVICE = 1001
     const val ID_INCOMING = 1002
+    const val ID_HEALTH = 1003
 
     fun ensureChannels(ctx: Context) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -27,6 +32,14 @@ object NotificationHelper {
             )
             nm.createNotificationChannel(
                 NotificationChannel(
+                    CH_SERVICE_QUIET,
+                    ctx.getString(R.string.notif_ch_service_quiet),
+                    NotificationManager.IMPORTANCE_MIN
+                )
+            )
+            // 着信チャンネルの挙動は一切変えない (IMPORTANCE_HIGH + DND バイパス維持)。
+            nm.createNotificationChannel(
+                NotificationChannel(
                     CH_INCOMING,
                     ctx.getString(R.string.notif_ch_incoming),
                     NotificationManager.IMPORTANCE_HIGH
@@ -34,6 +47,13 @@ object NotificationHelper {
                     setBypassDnd(true)
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 }
+            )
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    CH_HEALTH,
+                    ctx.getString(R.string.notif_ch_health),
+                    NotificationManager.IMPORTANCE_DEFAULT
+                )
             )
         }
     }
@@ -46,7 +66,9 @@ object NotificationHelper {
      * @param pushIdle PUSH モードで WSS 未接続 (起床待ち) のとき true。
      * @param extension 内線番号 (hello.account)。空なら内線部分を省略する。
      */
-    fun serviceNotification(ctx: Context, pushIdle: Boolean, extension: String): Notification {
+    fun serviceNotification(
+        ctx: Context, pushIdle: Boolean, extension: String, quiet: Boolean = false
+    ): Notification {
         val pi = PendingIntent.getActivity(
             ctx, 0, Intent(ctx, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -59,46 +81,74 @@ object NotificationHelper {
             else ctx.getString(R.string.notif_service_title)
             t to ctx.getString(R.string.notif_service_text)
         }
-        return NotificationCompat.Builder(ctx, CH_SERVICE)
+        val b = NotificationCompat.Builder(ctx, if (quiet) CH_SERVICE_QUIET else CH_SERVICE)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(pi)
             .setOngoing(true)
-            .build()
+        if (quiet) {
+            // §6.5: ステータスバーのアイコンを消し、シェード最下部に折りたたむ。
+            b.setSilent(true)
+                .setShowWhen(false)
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+        }
+        return b.build()
     }
 
     /**
      * 通話中の常駐通知 (UI-DESIGN §3.2 の代替表示。オーバーレイ権限が無い場合)。
      * 本文「通話中 mm:ss」。タップで通話画面に戻る。
      */
-    fun inCallNotification(ctx: Context, elapsedSec: Int): Notification {
+    fun inCallNotification(ctx: Context, elapsedSec: Int, quiet: Boolean = false): Notification {
         val tap = PendingIntent.getActivity(
             ctx, 4, CallOverlayManager.callActivityIntent(ctx),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val mmss = "%02d:%02d".format(elapsedSec / 60, elapsedSec % 60)
-        return NotificationCompat.Builder(ctx, CH_SERVICE)
+        val b = NotificationCompat.Builder(ctx, if (quiet) CH_SERVICE_QUIET else CH_SERVICE)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentTitle(ctx.getString(R.string.notif_incall_title))
             .setContentText(ctx.getString(R.string.notif_incall_text, mmss))
             .setContentIntent(tap)
             .setOngoing(true)
-            .build()
+        if (quiet) b.setSilent(true).setShowWhen(false).setPriority(NotificationCompat.PRIORITY_MIN)
+        return b.build()
     }
 
     /** 発信呼出中の常駐通知 (オーバーレイ権限が無いときの通話中ピル代替)。 */
-    fun outgoingNotification(ctx: Context, to: String): Notification {
+    fun outgoingNotification(ctx: Context, to: String, quiet: Boolean = false): Notification {
         val tap = PendingIntent.getActivity(
             ctx, 5, CallOverlayManager.callActivityIntent(ctx),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return NotificationCompat.Builder(ctx, CH_SERVICE)
+        val b = NotificationCompat.Builder(ctx, if (quiet) CH_SERVICE_QUIET else CH_SERVICE)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentTitle(ctx.getString(R.string.notif_outgoing_title))
             .setContentText(ctx.getString(R.string.notif_outgoing_text, to))
             .setContentIntent(tap)
             .setOngoing(true)
+        if (quiet) b.setSilent(true).setShowWhen(false).setPriority(NotificationCompat.PRIORITY_MIN)
+        return b.build()
+    }
+
+    /**
+     * §6.3 定期チェックの警告通知 (1 本。タップで設定タブ)。
+     * ongoing=false、着信チャンネルとは別なので常駐通知の静音化の影響を受けない。
+     */
+    fun healthIssueNotification(ctx: Context, title: String, text: String): Notification {
+        val tap = PendingIntent.getActivity(
+            ctx, 6, MainActivity.settingsIntent(ctx),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(ctx, CH_HEALTH)
+            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .setOngoing(false)
             .build()
     }
 

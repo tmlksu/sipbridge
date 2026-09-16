@@ -188,3 +188,44 @@ gofmt 済み。
    (c) 着信時の名前解決を `ContactStore` → `DeviceContacts` の順に。
 
 受け入れ: `scripts/check.sh` (foss/gms 両 flavor + JVM テスト) が通ること。
+
+### T12: 到達性とセットアップ UX (v1.4) — 担当 Muse Spark 1.3 (pi)
+
+仕様: `docs/UI-DESIGN.md` §6 (v1.4)。**`android/` のみ触る** (relay・docs/PROTOCOL.md は変更しない)。
+参考実装 (読み取り専用): `/home/sudosu/Projects/General/PrefixDialer` の
+`app/src/main/java/io/github/tmlksu/prefixdialer/SystemStatus.kt` と `DECISIONS.md` の
+バッテリー最適化の節 — **OS 呼び出しを 1 ファイルに閉じ込める**方針と、
+`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` が S25 で無反応になった件をそのまま活かす。
+
+1. **`SystemStatus.kt` 新設** (§6.1): OS 状態のスナップショット + 設定画面へ飛ぶ Intent 候補リスト。
+   既存の `SettingsFragment` 内の判定 (`canDrawOverlays` / `isBatteryExcluded` /
+   `areNotificationsEnabled` / `fullscreenState`) を**この 1 ファイルへ移して呼び出しに置き換える**
+   (重複実装を残さない)。API 30 未満・非対応端末は `null` (非対応) を返し、行自体を出さない。
+2. **`PushHealth.kt` 新設** (§6.2): `sipbridge_health` prefs への記録と、純関数
+   `evaluate(now, Snapshot): List<Issue>`。記録点は `MainActivity.onResume` /
+   `BridgeService` (`register_push` 送信時・`hello` 受信時) / gms の `BridgeMessagingService`。
+3. **`HealthCheckReceiver.kt` 新設** (§6.3): 1 日 1 回の `setInexactRepeating`。
+   PUSH モードでトークン登録が 7 日以上前なら再登録のために接続。問題があれば通知
+   (新チャンネル `sipbridge_health`)。同一理由は 3 日に 1 回まで。解消したらキャンセル。
+   manifest に `<receiver android:exported="false">` を追加。`BridgeService.onCreate` と
+   `BootReceiver` からスケジュールする。
+4. **常駐通知を隠す** (§6.5): `BridgeConfigData.serviceNotificationQuiet` (既定 false) 追加。
+   `NotificationHelper` に `CH_SERVICE_QUIET` (IMPORTANCE_MIN) を追加し、
+   `serviceNotification` がフラグでチャンネルと priority を切り替える。設定変更時は
+   `BridgeService` が `startForeground` を出し直す (再起動しない)。トグル ON 時の案内ダイアログ +
+   `ACTION_CHANNEL_NOTIFICATION_SETTINGS` への導線。着信チャンネルは影響を受けないこと。
+5. **セットアップ導線** (§6.4): 設定画面先頭の「セットアップ」カード (不足が無ければ GONE) と
+   `SetupSheet` (`BottomSheetDialogFragment`)。ランタイム権限は
+   `registerForActivityResult(RequestMultiplePermissions)`。特別なアクセスは Intent 候補を
+   先頭から試し、戻ってきたら再判定。初回起動時と BLOCKING な不足があるとき (1 日 1 回) に自動表示。
+   権限カードに「マイク」「アプリの休止を無効化」行、Samsung 端末のみ案内行を追加。
+6. **バージョン**: `versionCode = 5` / `versionName = "1.4"`。
+7. **テスト**: `PushHealthTest` (JVM) — 各 `Issue` の閾値 (14 日 / 45 日 / 7 日)、
+   BLOCKING と WARN の並び、通知の 3 日抑止ロジック、モード別 (PERSISTENT では
+   `PUSH_*` を出さない) を網羅。Android API に触らない純関数として書けていることが条件。
+
+制約: 外部依存を増やさない (`material` の BottomSheet は既存)。foss/gms 両 flavor でビルドが通ること。
+gms 専用 API (`FirebaseMessaging` 等) を `main` ソースセットに書かない。
+文言は `strings.xml` に置く (ハードコード禁止)。`gofmt`/relay は対象外。
+
+受け入れ: `scripts/check.sh` (foss/gms 両 flavor の assemble + JVM テスト) が通ること。
