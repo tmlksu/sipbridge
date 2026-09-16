@@ -1,6 +1,5 @@
 package net.peyan.sipbridge
 
-import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -38,6 +37,7 @@ import com.google.android.material.button.MaterialButton
  * - 共通: キャプション「SIP BRIDGE・着信/発信/通話中」、アバター円 (1 文字目)、名前、番号、状態行。
  * - 状態行の「•••」は 3 点の点滅アニメ (Handler)。
  * - ロック画面上表示・画面点灯・KEEP_SCREEN_ON・着信音/バイブは旧画面から移植。
+ *   ロック解除は求めない (認証なしでロック画面上のまま応答・通話できる)。
  * - 通話中 (スピーカー OFF) は近接センサーで画面を消す (耳に当てた状態の誤タップ防止)。
  * - 「縮小」ボタンは持たない。ホーム操作で離れれば Service が通話中ピルを出す。
  */
@@ -97,11 +97,9 @@ class CallActivity : AppCompatActivity(), CallHub.StateListener {
                         WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
             )
         }
-        (getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager).let { km ->
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                km.requestDismissKeyguard(this, null)
-            }
-        }
+        // ロック解除 (requestDismissKeyguard) は要求しない。
+        // セキュアロック中に呼ぶと通話画面より先に PIN/生体の認証 UI が出てしまうため、
+        // showWhenLocked のままロック画面の上で応答・通話できるようにする (標準の電話アプリと同じ挙動)。
         setContentView(R.layout.activity_call)
         applyWindowInsets()
 
@@ -404,6 +402,9 @@ class CallActivity : AppCompatActivity(), CallHub.StateListener {
             setTextColor(ContextCompat.getColor(ctx, R.color.nocturne_text))
             setOnClickListener { sheet.dismiss() }
         })
+        // ロック画面の上に通話画面を出したまま (= ロック解除なし) でもキーパッドを使えるようにする。
+        // Dialog は Activity とは別ウィンドウなので showWhenLocked が効かず、フラグを個別に立てる。
+        sheet.window?.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
         sheet.setContentView(root)
         sheet.setOnDismissListener { dtmfSheet = null }
         dtmfSheet = sheet
