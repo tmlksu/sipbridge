@@ -24,6 +24,13 @@ Builds:
   - versionName: '1.3'
     versionCode: 4
     commit: v1.3
+    subdir: android/app
+    gradle:
+      - foss
+
+  - versionName: '1.4'
+    versionCode: 5
+    commit: v1.4
     # gradle のルートは android/。ビルドするモジュールは android/app。
     subdir: android/app
     # foss フレーバーのみをビルドする。gms (Firebase/FCM) はビルドしない。
@@ -33,8 +40,8 @@ Builds:
 # 収録後のバージョン追従: git タグ (v1.3, v1.4, ...) を見る。
 AutoUpdateMode: Version v%v
 UpdateCheckMode: Tags
-CurrentVersion: '1.3'
-CurrentVersionCode: 4
+CurrentVersion: '1.4'
+CurrentVersionCode: 5
 
 # --- レビューで聞かれそうな点のメモ (提出時は削って構わない) ---
 #
