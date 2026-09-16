@@ -38,6 +38,12 @@ unzip -p "$APK" classes.dex | strings | grep -cE 'Lcom/google/(firebase|android/
 
 ## 2. 対応済み
 
+- **applicationId** — `net.peyan.sipbridge` → **`io.github.tmlksu.sipbridge`** (v1.3)。
+  公開リポジトリの持ち主から辿れる逆ドメインにした。F-Droid のメタデータ名も
+  `fdroid/io.github.tmlksu.sipbridge.yml` に改名済み。
+  収録前に変えたので fdroiddata 側への影響は無いが、**旧 ID で入れた端末は
+  上書き更新できない** (アンインストールしてから入れ直す)。
+
 - **`LICENSE`** — Apache-2.0。F-Droid はライセンスファイルを要求し、SPDX 識別子を
   メタデータに書く。依存がすべて Apache-2.0 なので整合する。
 - **ランチャーアイコン** — 以前はフレームワーク標準の
@@ -56,7 +62,7 @@ unzip -p "$APK" classes.dex | strings | grep -cE 'Lcom/google/(firebase|android/
   F-Droid はリポジトリ内のこの配置を自動で拾う。`title` / `short_description` /
   `full_description` / `changelogs/3.txt` / `images/icon.png`。
   relay の自前運用が必須であること、foss ビルドに push が無いことを本文に明記した。
-- **F-Droid ビルドレシピ** — `fdroid/net.peyan.sipbridge.yml`。fdroiddata へ出す雛形。
+- **F-Droid ビルドレシピ** — `fdroid/io.github.tmlksu.sipbridge.yml`。fdroiddata へ出す雛形。
   `subdir: android/app`, `gradle: [foss]`, タグ追従 (`UpdateCheckMode: Tags`)。
 - **`android/gradle/wrapper/gradle-wrapper.properties`** — Gradle 8.9 を宣言するためだけに
   置く。`gradle-wrapper.jar` と `gradlew` は意図的にコミットしない (F-Droid は
@@ -76,10 +82,11 @@ unzip -p "$APK" classes.dex | strings | grep -cE 'Lcom/google/(firebase|android/
 2. **`v1.2` の git タグ**。F-Droid のレシピは `commit: v1.2` を参照する。
 3. **fdroiddata へマージリクエスト**。`fdroid lint` → `fdroid build -l` で手元検証してから出す。
    初回収録はレビュー待ちが数週間かかることがある。
-4. (任意) **GitHub Releases 用の署名済み APK**。F-Droid は F-Droid 自身の鍵で署名するので
-   F-Droid には不要だが、GitHub から直接入れたい人向けには要る。
-   keystore はリポジトリ外に置き、環境変数から読む `signingConfigs.release` を足す。
-   **F-Droid 版と GitHub 版は署名が異なり相互に上書きインストールできない**点に注意。
+4. ~~(任意) GitHub Releases 用の署名済み APK~~ — **対応済み** (v1.3)。
+   `android/keystore.properties` (gitignore 済み) から読む `signingConfigs.release` を追加し、
+   タグ push で `.github/workflows/release.yml` が署名済み foss APK を Releases に添付する。
+   手順と鍵の扱いは `docs/RELEASE.md`。
+   **F-Droid 版と GitHub 版は署名が異なり相互に上書きインストールできない**点は変わらない。
 5. (任意) **R8 の有効化**。現在 `minifyEnabled` 未設定で APK が約 13 MB ある。
    `isMinifyEnabled`/`shrinkResources` で大幅に減る見込みだが、リフレクションを使う
    箇所 (JSON 周り) の動作確認が要る。

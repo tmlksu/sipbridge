@@ -71,7 +71,7 @@
 ## T4: Android アプリ
 
 `android/` は EchoSIP standby v1.5 のコピー。これを sipbridge クライアントに改造する。
-- applicationId / namespace: `net.peyan.sipbridge`、パッケージも移動。アプリ名「SIP Bridge」。`rootProject.name = "SipBridge"`。
+- applicationId / namespace: `io.github.tmlksu.sipbridge`、パッケージも移動。アプリ名「SIP Bridge」。`rootProject.name = "SipBridge"`。
 - **削除**: `SipEngine.kt`。UDP LISTEN を完全撤去 (`DatagramSocket` を残さない)。
 - **追加** `RelayClient.kt`: OkHttp 4.12 WebSocket。ヘッダ `CF-Access-Client-Id/Secret` (設定が空なら `Authorization: Bearer <devToken>`), `X-Device-Id` (初回生成し保存), `X-Client-Version`。`docs/PROTOCOL.md` の JSON を `org.json` で encode/decode (外部 JSON ライブラリ不要)。ping 20 秒、指数バックオフ再接続、`hello` で状態同期。リスナー: `onHello/onRegistration/onIncoming/onAnswered/onEnded/onError/onDisconnected`。
 - **改造** `RtpEngine.kt`: `DatagramSocket` を `MediaSink { fun send(rtp: ByteArray) }` + `onRtpReceived(ByteArray)` に置き換え (パケット生成/解析はそのまま)。ジッタバッファ 5 フレーム / 上限 20。

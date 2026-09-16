@@ -1,7 +1,29 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// リリース署名の設定は android/keystore.properties から読む。このファイルと keystore 本体は
+// リポジトリに含めない (`.gitignore` 済み)。このリポジトリは public なので、鍵とパスワードが
+// 履歴に入ると取り返しがつかない。
+//
+// 値が揃っていない場合は署名設定を作らず、release ビルドは未署名になる。これは意図した挙動で、
+// 鍵の無い環境 (F-Droid のビルドサーバ、クローンしただけの第三者) でも
+// `assembleRelease` と `test` が通る。手順は docs/RELEASE.md を参照。
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
+// 署名に必要な値が揃っているか。パスワードが空のまま keystore.properties を置いた場合も
+// 未設定として扱う。中途半端な設定でビルドを失敗させるより、未署名で通したほうが原因が分かりやすい。
+def hasSigningConfig = ["storeFile", "storePassword", "keyAlias", "keyPassword"].every {
+    def v = keystoreProperties.getProperty(it)
+    v != null && !v.trim().isEmpty()
+} && rootProject.file(keystoreProperties.getProperty("storeFile") ?: "").exists()
 
 // google-services.json が無い環境 (CI / 配布物) でもビルドが通るよう条件適用する。
 // FCM を使うのは gms flavor だけなので、置き場所は android/app/src/gms/google-services.json
@@ -20,15 +42,15 @@ if (file("google-services.json").exists() || file("src/gms/google-services.json"
 }
 
 android {
-    namespace = "net.peyan.sipbridge"
+    namespace = "io.github.tmlksu.sipbridge"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "net.peyan.sipbridge"
+        applicationId = "io.github.tmlksu.sipbridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
     }
     buildFeatures {
         // RelayProtocol.CLIENT_VERSION が versionName を参照するため。
@@ -45,8 +67,35 @@ android {
             // google-services プラグイン無しでもビルドは通る。
         }
     }
+    signingConfigs {
+        if (hasSigningConfig) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                // minSdk 29 なので v1 (JAR 署名) は不要。v3 (Android 9+) を有効にしておくと、
+                // 将来ここの鍵を替えるとき (鍵ローテーション) の道が残る。
+                // AGP が実際に APK へ付けるのは v3 ブロックだけになる (v3 が v2 を兼ねる)。
+                // v3 を読めない端末は minSdk 29 未満なので、この構成で取りこぼしは無い。
+                // 確認: apksigner verify -v → "v3 scheme ...: true"
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
     buildTypes {
         release {
+            if (hasSigningConfig) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                // 未署名で通ること自体は意図した挙動 (鍵の無い環境でもビルドできる)。
+                // ただし黙って未署名 APK が出来ると、配布直前まで気づけない。
+                logger.lifecycle(
+                    "[SipBridge] keystore.properties が無いか値が空のため、" +
+                        "release APK は未署名になります。")
+            }
         }
         debug {
             applicationIdSuffix = ""
