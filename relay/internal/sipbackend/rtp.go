@@ -1,0 +1,135 @@
+// Package sipbackend の RTP パイプ (UDP)。
+package sipbackend
+
+import (
+	"fmt"
+	"net"
+	"sync"
+
+	"github.com/tmlksu/sipbridge/relay/internal/call"
+)
+
+// recvQueueLen は MediaPipe.Recv のバッファ長である。
+// fakebackend と同じ 50 とし、溢れたら古い方を捨てる。
+const recvQueueLen = 50
+
+// rtpPipe は UDP ソケット上の RTP 送受パイプである。
+// call.MediaPipe を満たす。RTCP と見られるパケットは捨てる。
+// Close は冪等である。
+type rtpPipe struct {
+	conn *net.UDPConn
+
+	mu     sync.RWMutex
+	remote *net.UDPAddr
+
+	ch        chan []byte
+	closed    chan struct{}
+	closeOnce sync.Once
+	wg        sync.WaitGroup
+}
+
+var _ call.MediaPipe = (*rtpPipe)(nil)
+
+// newRTPPipe はソケットと初期宛先からパイプを作り、受信ループを開始する。
+func newRTPPipe(conn *net.UDPConn, remote *net.UDPAddr) *rtpPipe {
+	p := &rtpPipe{
+		conn:   conn,
+		remote: remote,
+		ch:     make(chan []byte, recvQueueLen),
+		closed: make(chan struct{}),
+	}
+	p.wg.Add(1)
+	go p.readLoop()
+	return p
+}
+
+// setRemote は送信宛先を更新する (re-INVITE 追従用)。
+func (p *rtpPipe) setRemote(remote *net.UDPAddr) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.remote = remote
+}
+
+// Send は RTP パケットを相手に UDP 送信する。
+func (p *rtpPipe) Send(rtp []byte) error {
+	select {
+	case <-p.closed:
+		return fmt.Errorf("RTP パイプは閉じている")
+	default:
+	}
+	p.mu.RLock()
+	remote := p.remote
+	p.mu.RUnlock()
+	if remote == nil {
+		return fmt.Errorf("RTP 宛先が未確定")
+	}
+	// 送信中に Close されても conn が閉じるだけ (エラーで返す)。
+	_, err := p.conn.WriteToUDP(rtp, remote)
+	return err
+}
+
+// Recv は受信パケットのチャネルである。Close で閉じる。
+func (p *rtpPipe) Recv() <-chan []byte { return p.ch }
+
+// Close はソケットと受信ループを止め、チャネルを閉じる。
+func (p *rtpPipe) Close() error {
+	p.closeOnce.Do(func() {
+		close(p.closed)
+		_ = p.conn.Close()
+		p.wg.Wait()
+		close(p.ch)
+	})
+	return nil
+}
+
+func (p *rtpPipe) readLoop() {
+	defer p.wg.Done()
+	buf := make([]byte, 2048)
+	for {
+		n, _, err := p.conn.ReadFromUDP(buf)
+		if err != nil {
+			// Close による終了が通常系である。
+			return
+		}
+		if n <= 0 {
+			continue
+		}
+		if isRTCP(buf[:n]) {
+			continue // v1 では RTCP を扱わない
+		}
+		cp := append([]byte(nil), buf[:n]...)
+		select {
+		case p.ch <- cp:
+		default:
+			// 溢れたら古い方を捨てて入れ直す。
+			select {
+			case <-p.ch:
+			default:
+			}
+			select {
+			case p.ch <- cp:
+			case <-p.closed:
+				return
+			}
+		}
+		select {
+		case <-p.closed:
+			return
+		default:
+		}
+	}
+}
+
+// isRTCP は RTCP パケットらしいかを判定する。
+// RTP の PT は 7 bit (0-127) だが、RTCP のパケット種別 (SR=200, RR=201,
+// SDES=202, BYE=203, APP=204) は 200 以上になることを利用する。
+func isRTCP(pkt []byte) bool {
+	if len(pkt) < 2 {
+		return false
+	}
+	if pkt[0]>>6 != 2 {
+		return false // RTP バージョン 2 でも RTCP でも無い
+	}
+	t := pkt[1]
+	return t >= 200 && t <= 204
+}

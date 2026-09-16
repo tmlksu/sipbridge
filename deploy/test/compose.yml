@@ -1,0 +1,17 @@
+# sipbridge 結合テスト (T2)。Asterisk コンテナ + relay SIP バックエンド。
+# relay (../relay) とは別ネットワークにしないこと: Asterisk は
+# network_mode: host で起動し、ホストの 5060/udp と RTP を直接使う。
+# relay テストは LOCAL_IP=127.0.0.1、RTP 40000 番台で動く。
+
+name: sipbridge-test
+
+services:
+  asterisk:
+    image: andrius/asterisk:latest
+    container_name: sipbridge-test-asterisk
+    network_mode: host
+    volumes:
+      - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
+    restart: "no"

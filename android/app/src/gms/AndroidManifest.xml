@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- gms flavor の追加 manifest。main の manifest にマージされる (foss には影響なし)。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- FCM data message の受信口。google-services.json が無くてもビルドは通る。
+             実行時に Firebase の初期化が無い場合、システムはこのサービスを起こさない。 -->
+        <service
+            android:name=".BridgeMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 画面文言の集約先。ログ文言 (Log.*) は対象外でコード内に残す。 -->
+<resources>
+    <string name="app_name">SIP Bridge</string>
+
+    <!-- 共通 -->
+    <string name="common_ok">OK</string>
+    <string name="common_cancel">キャンセル</string>
+    <string name="common_close">閉じる</string>
+    <string name="common_save">保存する</string>
+    <string name="common_delete">削除する</string>
+    <string name="common_add">追加する</string>
+    <string name="common_edit">編集</string>
+    <string name="common_delete_item">削除</string>
+    <string name="common_unset">未設定</string>
+    <string name="common_mask">••••••••</string>
+    <string name="common_mic_permission">マイク権限が必要です</string>
+    <string name="common_open_settings_fail">設定画面を開けません: %1$s</string>
+    <string name="group_uchi">ウチ</string>
+    <string name="group_soto">ソト</string>
+    <string name="group_device">端末</string>
+
+    <!-- 下部ナビ -->
+    <string name="nav_keypad">キーパッド</string>
+    <string name="nav_history">履歴</string>
+    <string name="nav_contacts">連絡先</string>
+    <string name="nav_settings">設定</string>
+
+    <!-- 通話画面 (CallActivity) -->
+    <string name="call_caption_incoming">SIP BRIDGE・着信</string>
+    <string name="call_caption_outgoing">SIP BRIDGE・発信</string>
+    <string name="call_caption_incall">SIP BRIDGE・通話中</string>
+    <string name="call_unknown">不明な発信者</string>
+    <string name="call_unknown_short">不明</string>
+    <string name="call_state_initial">着信中</string>
+    <string name="call_state_incoming">着信中 %1$s</string>
+    <string name="call_state_outgoing">呼出中 %1$s</string>
+    <string name="call_state_outgoing_early">呼出中 (相手側応答音) %1$s</string>
+    <string name="call_end_toast">通話終了 %1$s</string>
+    <string name="call_answer">応答</string>
+    <string name="call_reject">拒否</string>
+    <string name="call_disconnect">切断</string>
+    <string name="call_mute">ミュート</string>
+    <string name="call_keypad">キーパッド</string>
+    <string name="call_speaker">スピーカー</string>
+    <string name="call_hold">保留</string>
+    <string name="call_add">通話を追加</string>
+    <string name="call_contacts">連絡先</string>
+    <string name="call_end">終了</string>
+    <string name="call_hold_desc">保留 (v1 は無効)</string>
+    <string name="call_add_desc">通話を追加 (v1 は無効)</string>
+    <string name="call_contacts_desc">連絡先 (v1 は無効)</string>
+    <string name="call_delete_desc">削除 (長押しで全消去)</string>
+    <string name="call_dial_desc">発信</string>
+
+    <!-- キーパッド -->
+    <string name="keypad_status_offline">○ 未接続</string>
+    <string name="keypad_status_unregistered">○ 未登録</string>
+    <string name="keypad_status_registered">● 登録OK%1$s</string>
+    <string name="keypad_status_ext">・内線 %1$s</string>
+    <string name="keypad_mode_persistent">常時接続</string>
+    <string name="keypad_mode_push">PUSH 起床</string>
+    <string name="keypad_hint_empty">番号を入力、または履歴・連絡先から発信</string>
+    <string name="keypad_caption_extension">内線番号</string>
+    <string name="keypad_caption_external">外線</string>
+    <string name="keypad_back_to_call">通話に戻る</string>
+    <string name="overlay_calling">呼出中</string>
+    <string name="settings_overlay_warn">オーバーレイ権限が未許可です。タップして許可してください</string>
+    <string name="keypad_need_number">番号を入力してください</string>
+
+    <!-- 履歴 -->
+    <string name="history_title">履歴</string>
+    <string name="history_clear">全消去</string>
+    <string name="history_seg_all">すべて</string>
+    <string name="history_seg_missed">不在着信</string>
+    <string name="history_empty">履歴はまだありません</string>
+    <string name="history_note">行をタップすると発信します。relay 経由のため端末では 5060 を待ち受けません。</string>
+    <string name="history_menu_add">連絡先に追加</string>
+    <string name="history_clear_msg">履歴をすべて削除しますか？</string>
+    <string name="history_need_name">名前を入力してください</string>
+    <string name="history_added">連絡先に追加しました</string>
+    <string name="history_unknown">不明</string>
+    <string name="history_kind_in">着信</string>
+    <string name="history_kind_out">発信</string>
+    <string name="history_kind_missed">不在着信</string>
+    <string name="history_time_yesterday">昨日</string>
+    <string name="history_time_empty">--:--</string>
+    <string name="history_name_hint">名前</string>
+
+    <!-- 連絡先 -->
+    <string name="contacts_title">連絡先</string>
+    <string name="contacts_search_hint">🔍 名前・内線番号で検索</string>
+    <string name="contacts_empty">連絡先を追加すると、着信時に名前で表示されます</string>
+    <string name="contacts_add_title">連絡先を追加</string>
+    <string name="contacts_edit_title">連絡先を編集</string>
+    <string name="contacts_need_both">名前と番号を入力してください</string>
+    <string name="contacts_call">発信</string>
+    <string name="contacts_pick_from_device">端末の連絡先から選ぶ</string>
+    <string name="contacts_read_fail">端末の連絡先を読み取れませんでした</string>
+    <string name="contacts_save_to_local">連絡先に保存</string>
+    <string name="contacts_saved">連絡先に保存しました</string>
+    <string name="contacts_delete_msg">「%1$s」を削除しますか？</string>
+    <string name="contacts_name_hint">名前</string>
+    <string name="contacts_number_hint">番号 (内線・外線)</string>
+
+    <!-- 設定 -->
+    <string name="settings_conn_title_online">● relay に接続中</string>
+    <string name="settings_conn_title_offline">○ 未接続</string>
+    <string name="settings_conn_title_retry">再接続中…</string>
+    <string name="settings_conn_detail">%1$s・内線 %2$s</string>
+    <string name="settings_status_initial">未起動</string>
+    <string name="settings_gain_placeholder">マイクゲイン: --</string>
+    <string name="settings_conn_start">開始</string>
+    <string name="settings_conn_stop">停止</string>
+    <string name="settings_sec_conn">接続</string>
+    <string name="settings_sec_sip">SIP アカウント</string>
+    <string name="settings_sec_behavior">動作</string>
+    <string name="settings_sec_audio">音声</string>
+    <string name="settings_sec_permission">権限</string>
+    <string name="settings_row_relay_url">relay URL</string>
+    <string name="settings_row_access_id">Access Client ID</string>
+    <string name="settings_row_access_secret">Access Secret</string>
+    <string name="settings_row_dev_token">Dev Token</string>
+    <string name="settings_row_sip_user">内線番号 (SIP user)</string>
+    <string name="settings_row_sip_password">パスワード</string>
+    <string name="settings_row_sip_display">表示名 (任意)</string>
+    <string name="settings_sip_note">relay がこのアカウントで Asterisk に登録します。同じ内線を複数端末に設定すると同時着信し、先に応答した端末が通話します。</string>
+    <string name="settings_mode_persistent">常時接続</string>
+    <string name="settings_mode_push">PUSH 起床</string>
+    <string name="settings_mode_desc_persistent">常駐サービスで WSS を維持。着信が最速 (常時給電の端末向け)。</string>
+    <string name="settings_mode_desc_push">FCM で起床して接続し、通話終了 60 秒後に切断。スマホ向け。foss ビルドでは使えません。</string>
+    <string name="settings_sw_autostart">起動時に自動開始 (再起動後も接続を復帰)</string>
+    <string name="settings_sw_overlay">オーバーレイ着信 (他アプリの上にバブルを重ねる)</string>
+    <string name="settings_sw_speaker">スピーカーで応答</string>
+    <string name="settings_sw_speaker_desc">応答時にスピーカー出力にする (既定 OFF)。受話口の無い端末では OFF でもスピーカーになります</string>
+    <string name="settings_sw_device_contacts">端末の連絡先を表示</string>
+    <string name="settings_sw_device_contacts_desc">連絡先タブに「端末」グループを表示します (既定 OFF。ON にすると連絡先の権限を求めます)</string>
+    <string name="settings_gain">マイクゲイン: %1$.1f</string>
+    <string name="settings_row_perm_overlay">他のアプリの上に表示</string>
+    <string name="settings_row_perm_battery">電池の最適化を除外</string>
+    <string name="settings_row_perm_notification">通知</string>
+    <string name="settings_row_perm_fullscreen">全画面通知 (API 34+)</string>
+    <string name="settings_perm_allowed">許可済み</string>
+    <string name="settings_perm_denied">未許可</string>
+    <string name="settings_perm_excluded">除外済み</string>
+    <string name="settings_perm_not_excluded">未除外</string>
+    <string name="settings_perm_na">対象外</string>
+    <string name="settings_test_incoming">テスト着信を表示</string>
+    <string name="settings_test_from">テスト着信 (101)</string>
+    <string name="settings_test_display">テスト</string>
+    <string name="settings_footer">アプリ版 %1$s / relay 版 %2$s / device %3$s</string>
+    <string name="settings_conn_note">relay URL は必須。認証は Cloudflare Access (Client ID + Secret) か Dev Token の<b>どちらか一方</b>で構いません。入力は欄を離れると自動保存されます。</string>
+    <string name="settings_hint_relay_url">例: wss://relay.example.com</string>
+    <string name="settings_hint_dev_token">Access を使わない開発・LAN 接続用</string>
+    <string name="settings_setup_missing">未入力: %1$s</string>
+    <string name="settings_missing_relay_url">relay URL</string>
+    <string name="settings_missing_auth">認証 (Access Client ID + Secret か Dev Token)</string>
+    <string name="settings_missing_access_secret">Access Secret</string>
+    <string name="settings_err_start_missing">開始できません。%1$s を入力してください</string>
+    <string name="settings_err_url_invalid">relay URL が不正です</string>
+    <string name="settings_saved_restart">設定を保存し Bridge を再接続しました (%1$s)</string>
+    <string name="settings_start">Bridge 接続開始</string>
+    <string name="settings_perm_overlay_ok">オーバーレイ許可済み</string>
+    <string name="settings_perm_battery_ok">電池最適化は除外済み</string>
+    <string name="settings_perm_fullscreen_na">全画面通知の設定は API 34+ が対象です</string>
+
+    <!-- 通知 -->
+    <string name="notif_ch_service">Bridge 接続</string>
+    <string name="notif_ch_incoming">着信</string>
+    <string name="notif_service_title">relay に接続中</string>
+    <string name="notif_service_title_ext">relay に接続中・内線 %1$s</string>
+    <string name="notif_service_text">常時接続／常駐通知 (消去不可)</string>
+    <string name="notif_service_push_title">待機中 (PUSH 起床)</string>
+    <string name="notif_service_push_text">PUSH 起床待ち／常駐通知 (消去不可)</string>
+    <string name="notif_incall_title">通話中</string>
+    <string name="notif_incall_text">通話中 %1$s — タップで戻る</string>
+    <string name="notif_outgoing_title">呼出中</string>
+    <string name="notif_outgoing_text">%1$s を呼び出し中 — タップで戻る</string>
+    <string name="notif_incoming_title">着信中・%1$s</string>
+    <string name="notif_incoming_text">%1$s から (relay 経由)</string>
+    <string name="notif_action_answer">応答</string>
+    <string name="notif_action_reject">拒否</string>
+
+    <!-- オーバーレイ -->
+    <string name="overlay_incoming">着信: %1$s</string>
+    <string name="overlay_answer">応答</string>
+    <string name="overlay_reject">拒否</string>
+</resources>
