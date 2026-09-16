@@ -199,7 +199,10 @@ Galaxy S25 (gms flavor・PUSH モード) の起床用。Echo Show 5 (foss flavor
 1. [Firebase コンソール](https://console.firebase.google.com/)でプロジェクトを作成する
    (例: `sipbridge`。Google Analytics は不要なので OFF でよい)。
 2. プロジェクトの概要 → 「Android アプリを追加」:
-   - Android パッケージ名: `net.peyan.sipbridge` (デバッグ版も同じ ID)
+   - Android パッケージ名: `io.github.tmlksu.sipbridge` (デバッグ版も同じ ID)
+     (v1.2 以前の `net.peyan.sipbridge` で登録済みの場合は、新しいパッケージ名で
+     Android アプリを追加し直して `google-services.json` を取り直すこと。古い json のままだと
+     `No matching client found for package name` でビルドが失敗する)
    - SHA-1 の登録は不要 (FCM data message のみ使うため)
 3. `google-services.json` をダウンロードし、次のどちらかに置く
    (リポジトリに commit しないこと。`.gitignore` 済み):
@@ -284,7 +287,11 @@ Galaxy S25 (gms flavor・PUSH モード) の起床用。Echo Show 5 (foss flavor
 
 `X-Device-Id` はアプリが初回起動時に生成・保存する (意識する必要なし)。
 アプリ名は「SIP Bridge」。旧 EchoSIP (`com.echosip`) とは applicationId が
-異なる (`net.peyan.sipbridge`) ため共存できる。
+異なる (`io.github.tmlksu.sipbridge`) ため共存できる。
+
+v1.2 以前は applicationId が `net.peyan.sipbridge` だった。**別アプリ扱いになるので
+上書き更新はできない**。`adb uninstall net.peyan.sipbridge` (または端末からアンインストール)
+してから v1.3 以降を入れ、設定を入れ直すこと。
 
 ---
 

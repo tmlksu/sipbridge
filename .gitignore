@@ -3,6 +3,10 @@
 *.pem
 google-services.json
 service-account*.json
+# リリース署名。鍵とパスワードは絶対にコミットしない
+android/keystore.properties
+*.keystore
+*.jks
 # go
 relay/relay
 relay/bin/

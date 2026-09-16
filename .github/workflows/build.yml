@@ -1,0 +1,93 @@
+# push / PR ごとの検査。鍵は使わないので APK は未署名。
+# 署名済み APK はタグを打ったとき release.yml が作る。
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同じブランチへの連続 push では最新のものだけを走らせる
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # このリポジトリは gradle-wrapper.jar / gradlew を意図的にコミットしていない
+      # (F-Droid がリポジトリ内のバイナリを嫌うため。docs/DISTRIBUTION.md §2)。
+      # そのため wrapper ではなく、バージョンを指定した gradle を使う。
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Unit tests
+        run: gradle testFossDebugUnitTest testGmsDebugUnitTest
+
+      # google-services.json はリポジトリに無いので、CI の gms ビルドに FCM 設定は入らない。
+      # コンパイルが通ることの確認までがこのジョブの範囲。
+      - name: Assemble debug APKs (both flavors)
+        run: gradle assembleDebug
+
+      # keystore.properties が無いため未署名で出る。ここでは R8 等のビルド段階の破綻を見る。
+      - name: Assemble release APKs (unsigned)
+        run: gradle assembleRelease
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: android/app/build/reports/tests/
+          retention-days: 14
+
+      - name: Upload debug APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: android/app/build/outputs/apk/*/debug/*.apk
+          retention-days: 14
+
+  relay:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt されていないファイルがあります:"
+            echo "$unformatted"
+            exit 1
+          fi

@@ -62,7 +62,7 @@ Android app (`android/`, EchoSIP から派生)
 - 追加: `RelayClient.kt` (OkHttp WebSocket, Access Service Token ヘッダ, 再接続, JSON 制御), `RelayMedia` (RtpEngine の DatagramSocket を WS バイナリ送受に差し替え)。
 - 常駐モード 2 種: `PERSISTENT` (Echo Show: ForegroundService で WSS 常時接続, 今の運用と同じ) / `PUSH` (S25: FCM で起床し WSS 接続, 通話終了で切断)。
 - 設定: relay URL, Access Client ID/Secret, モード, マイクゲイン。パスワードは EncryptedSharedPreferences。
-- applicationId は `net.peyan.sipbridge` に変更 (旧 EchoSIP と共存可)。
+- applicationId は `io.github.tmlksu.sipbridge` (旧 EchoSIP と共存可)。GitHub の所有者由来の逆ドメインで、同じ持ち主の prefix-dialer (`io.github.tmlksu.prefixdialer`) と揃えてある。リリース署名は `docs/RELEASE.md`。
 
 ## 4. セキュリティ層
 
