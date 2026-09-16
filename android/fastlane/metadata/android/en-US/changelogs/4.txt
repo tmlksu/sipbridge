@@ -1,0 +1,2 @@
+* The application ID is now io.github.tmlksu.sipbridge (this is not an update of the old net.peyan.sipbridge build: uninstall it first, then install this one)
+* Release signing added for the APKs published on GitHub Releases
