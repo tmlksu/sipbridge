@@ -1,0 +1,107 @@
+# タグ (v1.3 など) を push したときに、署名済みの foss APK を作って
+# GitHub Releases に添付する。
+#
+# 必要な Secrets (Settings > Secrets and variables > Actions):
+#   ANDROID_KEYSTORE_BASE64   android/release.keystore を base64 -w0 したもの
+#   ANDROID_KEYSTORE_PASSWORD keystore のパスワード (store と key で同じ値)
+# 鍵の別名 (sipbridge) は秘密ではないので下にそのまま書く。
+# 手順は docs/RELEASE.md を参照。
+#
+# gms フレーバーは google-services.json がリポジトリに無く、CI では FCM 設定の無い
+# APK しか作れないため、ここでは配布しない (foss のみ)。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '対象のタグ (例 v1.3)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Restore the release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD が未設定です。" \
+                 "未署名の APK を配ってしまわないよう、ここで止めます。"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > android/release.keystore
+          cat > android/keystore.properties <<PROPS
+          storeFile=release.keystore
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=sipbridge
+          keyPassword=$KEYSTORE_PASSWORD
+          PROPS
+
+      - name: Unit tests
+        working-directory: android
+        run: gradle testFossDebugUnitTest
+
+      - name: Assemble signed foss release APK
+        working-directory: android
+        run: gradle assembleFossRelease
+
+      # 署名が本当に付いているかを機械的に確認する。keystore.properties の値が欠けていると
+      # ビルドは成功したまま未署名 APK が出るため、人間の目に頼らない。
+      - name: Verify the APK is signed
+        working-directory: android
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          APK=$(ls app/build/outputs/apk/foss/release/*.apk | head -1)
+          echo "checking $APK"
+          case "$APK" in
+            *unsigned*) echo "::error::未署名の APK が出来ています: $APK"; exit 1 ;;
+          esac
+          "$APKSIGNER" verify --print-certs "$APK"
+
+      - name: Rename the APK
+        id: apk
+        working-directory: android
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          SRC=$(ls app/build/outputs/apk/foss/release/*.apk | head -1)
+          DEST="sipbridge-${TAG}-foss.apk"
+          cp "$SRC" "../$DEST"
+          echo "path=$DEST" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Clean up the keystore
+        if: always()
+        run: rm -f android/release.keystore android/keystore.properties
+
+      - name: Upload to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.apk.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.apk.outputs.path }}" --clobber
+          else
+            gh release create "$TAG" "${{ steps.apk.outputs.path }}" \
+              --title "$TAG" --generate-notes
+          fi

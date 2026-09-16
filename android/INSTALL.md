@@ -1,8 +1,11 @@
-# SIP Bridge アプリ — 導入・試験手順 (Nocturne UI, v1.1)
+# SIP Bridge アプリ — 導入・試験手順 (Nocturne UI, v1.3)
 
 APK: `app/build/outputs/apk/foss/debug/app-foss-debug.apk` /
 `app/build/outputs/apk/gms/debug/app-gms-debug.apk`
-(package `net.peyan.sipbridge`。旧 EchoSIP と共存可)
+(package `io.github.tmlksu.sipbridge`。旧 EchoSIP と共存可)
+
+> v1.2 以前は `net.peyan.sipbridge` だった。ID が変わったので上書き更新はできない。
+> 先に `adb uninstall net.peyan.sipbridge` してから入れること (設定は入れ直しになる)。
 
 前提: relay が Docker で起動し、Asterisk に登録できる状態であること
 (`docs/SETUP.md` の手順済み。relay URL と Access Service Token を控えておく)。

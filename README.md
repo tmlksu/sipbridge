@@ -8,6 +8,7 @@
 - `docs/UI-DESIGN.md` — アプリ画面仕様 (`docs/design/android-app-design.pdf` の文章化)
 - `scripts/` — ビルド/テスト一括 (`check.sh`)・端末投入 (`adb-setup.sh`)・アイコン生成 (`gen-icon.py`)
 - `docs/DISTRIBUTION.md` — 配布 (F-Droid を第一ターゲット) の検証結果と残タスク
+- `docs/RELEASE.md` — リリース署名 (applicationId / keystore) と GitHub Releases の手順
 - `docs/REPO-SPLIT.md` — public / private (`ops/`) の分割方針と移行手順
 - `TASKS.md` — 実装タスク分割 (paseo エージェント割当)
 - `relay/` — 変換装置 (Go)。SIP サーバ (Asterisk / ひかり電話 HGW など) には SIP/UDP 内線として振る舞い、アプリには Cloudflare Tunnel 越しの WSS を提供
