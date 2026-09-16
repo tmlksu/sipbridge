@@ -33,6 +33,46 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) {
             showTab(R.id.nav_keypad)
         }
+        // 健康チェック通知のタップで設定タブを開く (§6.3)。
+        if (savedInstanceState == null && intent?.getStringExtra(EXTRA_TAB) == TAB_SETTINGS) {
+            bottomNav.selectedItemId = R.id.nav_settings
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getStringExtra(EXTRA_TAB) == TAB_SETTINGS) {
+            bottomNav.selectedItemId = R.id.nav_settings
+        }
+    }
+
+    /**
+     * §6.2: OS から見た「使用」を記録する。休止除外の判定 (45 日) の基準時刻。
+     * §6.4: 初回起動時と BLOCKING 不足時 (1 日 1 回) に SetupSheet を自動表示する。
+     */
+    override fun onResume() {
+        super.onResume()
+        PushHealth.markUserOpen(this)
+        maybeAutoShowSetup()
+    }
+
+    private fun maybeAutoShowSetup() {
+        if (isFinishing) return
+        val now = System.currentTimeMillis()
+        val lastShown = PushHealth.getLastSetupShownAt(this)
+        val issues = PushHealth.evaluate(now, PushHealth.buildSnapshot(this))
+        // シートで対処できる BLOCKING だけを数える (PUSH_TOKEN_MISSING 等はシートに
+        // 項目が無く自動表示してもユーザーが何もできないため)。
+        val blocking = issues.any {
+            it.severity == PushHealth.Severity.BLOCKING && PushHealth.isActionable(it.kind)
+        }
+        if (lastShown <= 0L || (blocking && now - lastShown > PushHealth.SETUP_AUTO_SHOW_MS)) {
+            PushHealth.markSetupShown(this, now)
+            runCatching {
+                SetupSheet().show(supportFragmentManager, TAG_SETUP)
+            }
+        }
     }
 
     /**
@@ -94,5 +134,16 @@ class MainActivity : AppCompatActivity() {
         private const val TAG_HISTORY = "history"
         private const val TAG_CONTACTS = "contacts"
         private const val TAG_SETTINGS = "settings"
+        private const val TAG_SETUP = "setup"
+        const val EXTRA_TAB = "sipbridge.tab"
+        const val TAB_SETTINGS = "settings"
+
+        /** 健康チェック通知のタップ先 (§6.3): 設定タブを開く Intent。 */
+        fun settingsIntent(ctx: android.content.Context): android.content.Intent =
+            android.content.Intent(ctx, MainActivity::class.java).apply {
+                flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_TAB, TAB_SETTINGS)
+            }
     }
 }

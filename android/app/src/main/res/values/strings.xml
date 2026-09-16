@@ -161,12 +161,15 @@
     <string name="settings_saved_restart">設定を保存し Bridge を再接続しました (%1$s)</string>
     <string name="settings_start">Bridge 接続開始</string>
     <string name="settings_perm_overlay_ok">オーバーレイ許可済み</string>
+    <string name="settings_perm_mic_ok">マイク許可済み</string>
     <string name="settings_perm_battery_ok">電池最適化は除外済み</string>
     <string name="settings_perm_fullscreen_na">全画面通知の設定は API 34+ が対象です</string>
 
     <!-- 通知 -->
     <string name="notif_ch_service">Bridge 接続</string>
+    <string name="notif_ch_service_quiet">常駐サービス (静音)</string>
     <string name="notif_ch_incoming">着信</string>
+    <string name="notif_ch_health">着信の設定確認</string>
     <string name="notif_service_title">relay に接続中</string>
     <string name="notif_service_title_ext">relay に接続中・内線 %1$s</string>
     <string name="notif_service_text">常時接続／常駐通知 (消去不可)</string>
@@ -185,4 +188,56 @@
     <string name="overlay_incoming">着信: %1$s</string>
     <string name="overlay_answer">応答</string>
     <string name="overlay_reject">拒否</string>
+
+    <!-- 到達性とセットアップ (v1.4, UI-DESIGN §6) -->
+    <string name="settings_row_perm_mic">マイク</string>
+    <string name="settings_row_perm_hibernation">アプリの休止を無効化</string>
+    <string name="settings_row_perm_hibernation_note">API 30+ が対象です</string>
+    <string name="settings_samsung_guide">Samsung: 設定 → バッテリー → バックグラウンド使用制限 →「スリープ状態にしないアプリ」に追加</string>
+    <string name="settings_sw_quiet">常駐通知を隠す</string>
+    <string name="settings_sw_quiet_desc">常駐通知を静音表示にします (ステータスバーのアイコンが消え、通知シェードの下に折りたたまれます)</string>
+    <string name="settings_quiet_dialog_title">常駐通知を静音にしました</string>
+    <string name="settings_quiet_dialog_msg">完全に非表示にするには、通知設定で「常駐サービス (静音)」をオフにしてください。着信通知は別チャンネルのため影響しません。Service は動き続けます。</string>
+    <string name="settings_quiet_dialog_open">通知設定を開く</string>
+
+    <!-- セットアップカード (§6.4) -->
+    <string name="setup_card_title">あと %1$d 件の設定が必要です</string>
+    <string name="setup_card_open">まとめて設定</string>
+
+    <!-- SetupSheet (§6.4) -->
+    <string name="setup_title">セットアップ</string>
+    <string name="setup_desc">着信を受けられるように設定します。必須から済ませてください。</string>
+    <string name="setup_close">閉じる</string>
+    <string name="setup_badge_required">必須</string>
+    <string name="setup_badge_recommended">推奨</string>
+    <string name="setup_badge_done">許可済み</string>
+    <string name="setup_action_allow">許可</string>
+    <string name="setup_action_open">開く</string>
+    <string name="setup_open_fail">設定画面を開けませんでした</string>
+    <string name="setup_item_mic">マイク</string>
+    <string name="setup_item_mic_desc">通話に必要です</string>
+    <string name="setup_item_notifications">通知</string>
+    <string name="setup_item_notifications_desc">着信の表示に必要です</string>
+    <string name="setup_item_battery">電池の最適化を除外</string>
+    <string name="setup_item_battery_desc">有効のままだと着信が遅れることがあります</string>
+    <string name="setup_item_hibernation">アプリの休止を無効化</string>
+    <string name="setup_item_hibernation_desc">長く使わないと OS が休止させ、着信 push が届かなくなります</string>
+    <string name="setup_item_overlay">オーバーレイ着信</string>
+    <string name="setup_item_overlay_desc">他アプリの上に着信バブルを重ねます</string>
+    <string name="setup_item_fullscreen">全画面通知</string>
+    <string name="setup_item_fullscreen_desc">ロック画面で着信を全画面表示します</string>
+
+    <!-- 健康チェック通知 (§6.3) -->
+    <string name="health_title_blocking">着信を受けられない設定があります</string>
+    <string name="health_title_hibernation_soon">しばらくアプリが使われていません</string>
+    <string name="health_text_hibernation_soon">このままだと OS がアプリを休止させ、着信 push が届かなくなります。タップして開いてください</string>
+    <string name="health_title_check">着信の設定を確認してください</string>
+    <string name="health_reason_notifications_off">通知がオフのため着信を表示できません</string>
+    <string name="health_reason_mic_denied">マイク権限がなく通話できません</string>
+    <string name="health_reason_push_token_missing">push トークンが未登録のため着信で起床できません</string>
+    <string name="health_reason_push_registration_stale">push の登録が 14 日以上前のため再登録してください</string>
+    <string name="health_reason_hibernation_soon">OS がアプリを休止させる可能性があります</string>
+    <string name="health_reason_battery_optimized">電池の最適化が有効のため着信が遅れる可能性があります</string>
+    <string name="health_reason_overlay_denied">オーバーレイ権限がなく着信バブルを表示できません</string>
+    <string name="health_reason_fullscreen_denied">全画面通知が許可されていないためロック画面で着信を表示できません</string>
 </resources>
