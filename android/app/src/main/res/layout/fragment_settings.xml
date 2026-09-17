@@ -437,6 +437,43 @@
                     android:textColor="@color/nocturne_text_dim"
                     android:textSize="12sp" />
 
+                <!-- 通話画面 (Telecom 統合): 自動 / OS 標準 / アプリ独自。
+                     Telecom 非対応端末では表示しない。 -->
+                <LinearLayout
+                    android:id="@+id/rowTelecom"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="?attr/selectableItemBackground"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/settings_row_telecom"
+                        android:textColor="@color/nocturne_text"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:id="@+id/tvTelecomValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/nocturne_text_dim"
+                        android:textSize="13sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tvTelecomState"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="2dp"
+                    android:textColor="@color/nocturne_text_dim"
+                    android:textSize="12sp" />
+
                 <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/swQuiet"
                     android:layout_width="match_parent"

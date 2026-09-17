@@ -45,6 +45,14 @@ data class SystemStatus(
     val pushTokenPresent: Boolean = false,
     /** Samsung 製か (One UI のスリープ案内を出すため)。 */
     val isSamsung: Boolean = false,
+    /** CALL_PHONE が許可済みか。 */
+    val callPhoneGranted: Boolean = false,
+    /** READ_PHONE_STATE が許可済みか (managed 有効化の判定に必須)。 */
+    val readPhoneStateGranted: Boolean = false,
+    /** 通話アカウントが有効か。Telecom 非対応端末や `telecomPref == APP` では null (行を出さない)。
+     *  READ_PHONE_STATE 未許可のときは判定不能だが行は出したいので false を返す
+     *  (null にすると行が消えて詰む)。 */
+    val telecomAccountEnabled: Boolean? = null,
 ) {
     companion object {
 
@@ -57,6 +65,9 @@ data class SystemStatus(
             hibernationExempt = hibernationExempt(ctx),
             pushTokenPresent = hasPushToken(ctx),
             isSamsung = Build.MANUFACTURER.equals("samsung", ignoreCase = true),
+            callPhoneGranted = hasPermission(ctx, Manifest.permission.CALL_PHONE),
+            readPhoneStateGranted = hasPermission(ctx, Manifest.permission.READ_PHONE_STATE),
+            telecomAccountEnabled = telecomAccountEnabled(ctx),
         )
 
         fun hasPermission(ctx: Context, permission: String): Boolean =
@@ -106,6 +117,37 @@ data class SystemStatus(
             if (Build.VERSION.SDK_INT < 30) return null
             if (autoRevokeIntent(ctx).resolveActivity(ctx.packageManager) == null) return null
             return runCatching { ctx.packageManager.isAutoRevokeWhitelisted() }.getOrNull()
+        }
+
+        /**
+         * 通話アカウント (managed) が有効か。Telecom 非対応端末や
+         * `telecomPref == APP` (アプリ独自に固定) では null を返す (行を出さない)。
+         * `getCallCapablePhoneAccounts()` には READ_PHONE_STATE (ランタイム権限) が
+         * 必須のため、未許可のときは判定不能だが行は出したいので false を返す。
+         */
+        fun telecomAccountEnabled(ctx: Context): Boolean? = telecomAccountEnabledFrom(
+            hasTelecom = TelecomCompat.hasTelecom(ctx),
+            prefIsApp = runCatching { BridgeConfig.load(ctx).telecomPref }.getOrNull() ==
+                TelecomTierManager.Pref.APP,
+            readPhoneStateGranted = hasPermission(ctx, Manifest.permission.READ_PHONE_STATE),
+            managedEnabled = TelecomCompat.isManagedEnabled(ctx),
+        )
+
+        /**
+         * [telecomAccountEnabled] の判定本体 (純関数。JVM テスト対象)。
+         * READ_PHONE_STATE 未許可では `isManagedEnabled()` が常に false になるため、
+         * Telecom 呼び出しの前に false で打ち切る (原因が権限だと分かるようにするため)。
+         */
+        fun telecomAccountEnabledFrom(
+            hasTelecom: Boolean,
+            prefIsApp: Boolean,
+            readPhoneStateGranted: Boolean,
+            managedEnabled: Boolean,
+        ): Boolean? {
+            if (!hasTelecom) return null
+            if (prefIsApp) return null
+            if (!readPhoneStateGranted) return false
+            return managedEnabled
         }
 
         /** gms かつ FCM トークン保持か。main ソースセットなので Firebase API には触らない。 */
