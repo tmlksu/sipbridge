@@ -100,6 +100,15 @@ android {
         debug {
             applicationIdSuffix = ""
         }
+        // Telecom 統合 (OS 標準の通話画面) の実機検証用。src/probe/ だけを足した debug ビルド。
+        // applicationId が別 (`.probe`) なので、本番アプリを消さずに同居できる。
+        // adb の無い端末へ手で入れて画面から操作する (ProbeActivity)。
+        probe {
+            initWith(debug)
+            applicationIdSuffix = ".probe"
+            versionNameSuffix = "-probe"
+            matchingFallbacks = ["debug"]
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
