@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- Telecom 統合 (OS 標準の通話画面) 用。CALL_PHONE はランタイム権限で、
+         未許可でもアプリは従来どおり動く (ティア C に落ちるだけ)。 -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
@@ -72,6 +76,16 @@
             android:name=".BridgeService"
             android:exported="false"
             android:foregroundServiceType="phoneCall|microphone" />
+
+        <!-- Telecom 統合 (OS 標準の通話画面) 用。tel: の intent-filter は足さない。 -->
+        <service
+            android:name=".SipConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
 
         <receiver
             android:name=".BootReceiver"

@@ -240,4 +240,19 @@
     <string name="health_reason_battery_optimized">電池の最適化が有効のため着信が遅れる可能性があります</string>
     <string name="health_reason_overlay_denied">オーバーレイ権限がなく着信バブルを表示できません</string>
     <string name="health_reason_fullscreen_denied">全画面通知が許可されていないためロック画面で着信を表示できません</string>
+    <string name="health_reason_telecom_disabled">通話アカウントが無効のためOS標準の通話画面を使えません</string>
+
+    <!-- Telecom 統合 (OS 標準の通話画面) -->
+    <string name="telecom_account_label">SIP Bridge</string>
+    <string name="telecom_account_desc">SIP Bridge の内線通話</string>
+    <string name="settings_row_telecom">通話画面</string>
+    <string name="settings_telecom_auto">自動 (推奨)</string>
+    <string name="settings_telecom_system">OS 標準</string>
+    <string name="settings_telecom_app">アプリ独自</string>
+    <string name="settings_telecom_state_system">現在: OS 標準の通話画面を使用中</string>
+    <string name="settings_telecom_state_app">現在: アプリ独自の通話画面を使用中</string>
+    <string name="settings_telecom_state_app_disabled">現在: アプリ独自 (通話アカウントが無効)</string>
+    <string name="setup_item_telecom">通話アカウントを有効化</string>
+    <string name="setup_item_telecom_desc">OS標準の通話画面で発着信します。発信アカウント設定でSIP Bridgeを有効にしてください</string>
+    <string name="setup_item_telecom_desc_need_permission">電話の権限（発信・電話状態の確認）が無いためOS標準の通話画面を使えません。許可してから有効にしてください</string>
 </resources>

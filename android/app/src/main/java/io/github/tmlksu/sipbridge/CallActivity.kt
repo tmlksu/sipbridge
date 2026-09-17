@@ -83,6 +83,11 @@ class CallActivity : AppCompatActivity(), CallHub.StateListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // ティア A の呼では OS 標準画面が出ているため、自前 UI は誤って開かれても畳む。
+        if (CallHub.tier == CallTier.MANAGED) {
+            finish()
+            return
+        }
         // 通話中・着信中は画面を点けっぱなし (終了でActivityが閉じれば自動解除)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         // ロック画面上・画面ON
@@ -188,7 +193,13 @@ class CallActivity : AppCompatActivity(), CallHub.StateListener {
     }
 
     override fun onChanged() {
-        runOnUiThread { refresh() }
+        runOnUiThread {
+            if (CallHub.tier == CallTier.MANAGED) {
+                finish()
+                return@runOnUiThread
+            }
+            refresh()
+        }
     }
 
     private fun sendServiceAction(action: String) {

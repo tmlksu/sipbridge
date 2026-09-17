@@ -22,6 +22,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Telecom アカウントの登録/解除 (起動時)。失敗しても何も起きない。
+        TelecomTierManager.sync(this)
         setContentView(R.layout.activity_main)
 
         bottomNav = findViewById(R.id.bottomNav)
