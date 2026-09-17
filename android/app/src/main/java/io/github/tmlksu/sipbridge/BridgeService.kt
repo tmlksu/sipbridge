@@ -410,6 +410,19 @@ class BridgeService : Service(), RelayClient.Listener {
                 }
                 CallHub.updateStatus(note)
                 updateServiceNote()
+            } else if (CallHub.outgoing && CallHub.callId.isBlank()) {
+                // **発信直後で relay がまだ呼を作っていないだけ**。畳んではいけない。
+                //
+                // relay は sip_account を受理したあと hello をもう一度送る。発信は 1 通目の
+                // hello で送る (pendingDial) ため、2 通目が「通話なし」で届くレースがある。
+                // ここで畳むと、発信側だけ即「通話終了」になり、SIP の呼は生きたままなので
+                // 着信側は鳴り続ける (ティア A では OS の通話画面ごと消える)。
+                //
+                // 判定は callId で行う: relay が把握している呼には必ず callId があり、
+                // それは ringing/answered で入る。callId が空の発信は「relay が知らない呼」
+                // ではなく「これから作られる呼」。失敗した場合は relay が ended/error を
+                // 返すので、ここで畳まなくても取り残されない。
+                Log.i(TAG, "hello: 発信直後 (callId 未確定) のため畳まない")
             } else {
                 // relay 側に通話が無いのに表示中 → 他端末応答・タイムアウト。履歴を書いて表示を畳む。
                 finalizeActiveHistory()
