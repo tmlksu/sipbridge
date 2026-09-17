@@ -1,0 +1,1 @@
+* Fixed an outgoing call sometimes ending immediately on the caller's side while the other phone kept ringing (happened when the call reconnected to the relay first)
