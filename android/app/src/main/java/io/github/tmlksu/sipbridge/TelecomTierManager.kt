@@ -91,11 +91,27 @@ object TelecomTierManager {
         }.onFailure { Log.w(TAG, "recordDegrade failed", it) }
     }
 
-    /** アプリ更新・OS 変化を検知したら学習を捨てて再探索する。 */
+    /**
+     * アプリ更新・OS 変化・**前提条件の変化**を検知したら学習を捨てて再探索する。
+     *
+     * 前提条件 (通話アカウントの有効化・電話権限) を指紋に含めるのが重要。
+     * 含めないと「アカウントが無効だったせいでティア落ち → 学習に LEGACY が残る →
+     * ユーザーが有効化しても学習が効いたままティア C」という詰みが起きる
+     * ([decideFrom] は `maxTier == LEGACY` を無条件で LEGACY にするため)。
+     * ユーザーが足りないものを足したら、その場でもう一度上のティアを試す。
+     */
     fun resetIfEnvironmentChanged(ctx: Context) {
         runCatching {
+            // 前提条件のスナップショット。どれかが変わったら学習をやり直す。
+            val caps = listOf(
+                TelecomCompat.hasTelecom(ctx),
+                TelecomCompat.isManagedEnabled(ctx),
+                SystemStatus.hasPermission(ctx, android.Manifest.permission.READ_PHONE_STATE),
+                SystemStatus.hasPermission(ctx, android.Manifest.permission.CALL_PHONE),
+            ).joinToString("") { if (it) "1" else "0" }
             val current =
-                "${BuildConfig.VERSION_CODE}/${Build.VERSION.SDK_INT}/${Build.FINGERPRINT.hashCode()}"
+                "${BuildConfig.VERSION_CODE}/${Build.VERSION.SDK_INT}/" +
+                    "${Build.FINGERPRINT.hashCode()}/$caps"
             val cfg = BridgeConfig.load(ctx)
             if (cfg.telecomEnvFingerprint != current) {
                 Log.i(TAG, "environment changed, reset learned tier")
