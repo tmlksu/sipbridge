@@ -37,11 +37,18 @@ Builds:
     gradle:
       - foss
 
+  - versionName: '1.5'
+    versionCode: 6
+    commit: v1.5
+    subdir: android/app
+    gradle:
+      - foss
+
 # 収録後のバージョン追従: git タグ (v1.3, v1.4, ...) を見る。
 AutoUpdateMode: Version v%v
 UpdateCheckMode: Tags
-CurrentVersion: '1.4'
-CurrentVersionCode: 5
+CurrentVersion: '1.5'
+CurrentVersionCode: 6
 
 # --- レビューで聞かれそうな点のメモ (提出時は削って構わない) ---
 #

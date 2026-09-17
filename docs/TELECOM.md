@@ -87,6 +87,21 @@ val ok = tm.getPhoneAccount(handle)?.isEnabled == true
 val ok = tm.callCapablePhoneAccounts.contains(handle)
 ```
 
+### 3.1b `getCallCapablePhoneAccounts()` には READ_PHONE_STATE が要る (2026-09-17 追記)
+
+§3.1 の判定に使う `TelecomManager.getCallCapablePhoneAccounts()` は
+**READ_PHONE_STATE (ランタイム権限)** を要求する。マニフェストに書くだけでは足りない。
+
+プローブでこれに気づかなかったのは、`scripts/telecom-probe.sh` が `pm grant` と
+`install -g` で権限を付けていたため。**実配布の APK では既定で未許可**なので、
+要求しないと `isManagedEnabled()` が常に false になり、ユーザーが通話アカウントを
+有効化していても**ティア A に一度も到達しない**まま静かにティア B へ落ちる。
+
+P780 で実測 (v1.5 実装版): READ_PHONE_STATE を `pm revoke` すると、managed
+アカウントを有効化した状態でも着信が `prop=[ self_mng]` (ティア B) になった。
+
+→ 有効化の導線 (§3.5) では **CALL_PHONE と READ_PHONE_STATE を同時に要求**すること。
+
 ### 3.2 `tel:` の intent-filter は追加しない
 
 S25 では `tel:` を Groundwire も握っているため、素の `ACTION_CALL` だと Telecom の手前で
@@ -128,6 +143,36 @@ F-Droid 配布で段階リリースができないため、端末ごとに黙っ
 `EnableAccountPreferenceActivity` に直行できる (One UI 8 でも同じ)。
 `PhoneAccount.setShortDescription()` が副題として表示されるので、ここに説明を入れる。
 `SetupSheet` (§6.4) に「通話アカウントを有効化」の行を足す。
+
+### 3.5b Telecom を「持っている」判定に TelecomManager の有無を使わない (2026-09-17 追記)
+
+Echo Show 5 には **`com.android.server.telecom` パッケージが入っている**ため、
+`getSystemService(TELECOM_SERVICE) != null` だけで判定すると true になり、
+self-managed (ティア B) が成立してしまう。そうなると受話口の無い端末向けの
+スピーカー強制 (`applyInCallAudioRoute`) が飛ばされ、本番の Echo Show の挙動が変わる。
+
+実測した差 (2026-09-17):
+
+| | Galaxy S25 / P780 | Echo Show 5 |
+|---|---|---|
+| `android.software.connectionservice` | **あり** | 無し |
+| `android.hardware.telephony` | あり | 無し |
+| InCallService (`cmd package query-services -a android.telecom.InCallService`) | あり | **0 件** |
+| `telecom get-default-dialer` | `com.google.android.dialer` | `null` |
+
+→ `PackageManager.FEATURE_CONNECTION_SERVICE` を併せて見ること。
+
+### 3.5c 設定を「アプリ独自」→「自動」に戻すと有効化が外れる (2026-09-17 追記)
+
+`Pref.APP` では PhoneAccount を `unregisterPhoneAccount` するため、`AUTO` に戻して
+再登録したときに**ユーザーが付けた有効化が外れる** (Telecom は登録のたびに既定 = 無効で作る)。
+実測で確認済み。
+
+一方、**登録済みのアカウントを同じ内容で再登録し直しても有効化は外れない**
+(`BridgeService.onCreate` のたびに `sync()` を呼んでも問題ない)。これも実測済み。
+
+→ 「アプリ独自」に切り替えたあと「自動」に戻したユーザーは、発信アカウント設定で
+もう一度有効にする必要がある。1 日 1 回の健康診断と `SetupSheet` の行で気づける。
 
 ### 3.6 その他
 
@@ -175,12 +220,39 @@ F-Droid 配布で段階リリースができないため、端末ごとに黙っ
 
 Echo Show 向けの大きいボタン UI・オーバーレイの通話ピルはティア C で維持される。
 
-## 6. 進め方の提案
+## 6. 実装の状況
 
-1. **v1.5**: 連絡先の一元化 (§4) + `NotificationCompat.CallStyle`。Telecom 不要、全端末で効く。
-2. **v1.6**: Presenter の抽象化 + ティア B/C + ウォッチドッグ機構。
-3. **v1.7**: ティア A。土台とフォールバックが既にあるので、追加は `PhoneAccount` の
-   capability と有効化導線が中心。
+当初は v1.5/1.6/1.7 の 3 段階を提案したが、**ティア A/B/C 一式を v1.5 でまとめて実装した**
+(実装契約は `docs/TELECOM-IMPL.md`)。
+
+| | 状況 |
+|---|---|
+| ティア A (managed) / B (self-managed) / C (現行) | v1.5 で実装・P780 で実測 (§6.1) |
+| 沈黙失敗のウォッチドッグ (2 秒) と sticky degradation | v1.5 で実装 |
+| 有効化の導線 (`SetupSheet` + 1 日 1 回の点検) | v1.5 で実装 |
+| **連絡先の一元化 (§4)** | **未着手**。Telecom と独立に効くので次の版で |
+| `NotificationCompat.CallStyle` (ティア C の着信通知) | 未着手 |
+
+### 6.1 v1.5 の実機 E2E (P780 / Android 11 / 2026-09-17)
+
+`ops/telecom-e2e.sh` (非公開) で、実運用の Asterisk を相手に実測した。
+テスト内線 (`2105`) に着信させ、応答後は `Echo()` を鳴らす内線 (`2199`) に繋ぐ構成。
+
+| シナリオ | 結果 |
+|---|---|
+| ティア A 着信: OS 標準の着信画面 → `KEYCODE_CALL` で応答 | OK。`state=ACTIVE`、双方向 RTP 569 パケット |
+| ティア A 発信: アプリから発信 → OS 標準の通話画面 | OK。双方向 RTP 311 パケット |
+| ティア B 着信 (managed を無効化): `prop=[ self_mng]` + 自前 `CallActivity` | OK。双方向 RTP 339 パケット |
+| ティア C (設定「アプリ独自」): PhoneAccount を解除して従来経路 | OK。双方向 RTP 309 パケット |
+| **標準ダイヤラー起点の発信** (`ACTION_CALL tel:2199`) | OK。387 パケット。前面は Google Dialer の `InCallActivity` で、自前 `CallActivity` は出ない |
+| READ_PHONE_STATE 未許可のとき (§3.1b) | OK。黙ってティア B (`prop=[ self_mng]`) に落ちる |
+| 切断後に Telecom へ呼が残らないこと (`destroy()`) | OK (`mCalls:` が空、Asterisk 側も 0 channels) |
+
+ティア C は端末の**オーバーレイ権限が要る** (Android 11 以降、バックグラウンドからの
+Activity 起動に必要)。新規インストール直後に権限が無い状態では `CallActivity` が上がらず、
+2.5 秒後の着信通知にフォールバックする — これは v1.5 以前からの挙動で、変わっていない。
+
+S25 での確認 (One UI 8 のティア A・Bluetooth 経路・SIM と併存する発信アカウント選択) は未実施。
 
 ## 7. プローブの使い方
 

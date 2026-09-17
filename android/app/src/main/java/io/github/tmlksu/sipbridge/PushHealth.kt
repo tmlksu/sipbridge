@@ -49,6 +49,7 @@ object PushHealth {
         BATTERY_OPTIMIZED,
         OVERLAY_DENIED,
         FULLSCREEN_DENIED,
+        TELECOM_ACCOUNT_DISABLED,
     }
 
     data class Issue(val kind: Kind, val severity: Severity)
@@ -70,6 +71,10 @@ object PushHealth {
         val fullScreenIntentAllowed: Boolean?,
         val lastUserOpenAt: Long,
         val lastPushRegisteredAt: Long,
+        /** 通話アカウントが有効か。null = 非対応端末・アプリ独自固定 (判定しない)。 */
+        val telecomAccountEnabled: Boolean? = null,
+        /** telecomPref == APP (アプリ独自に固定) か。true なら通話アカウントを判定しない。 */
+        val telecomPrefIsApp: Boolean = false,
     )
 
     data class Times(
@@ -104,6 +109,9 @@ object PushHealth {
         if (!s.ignoringBatteryOptimizations) out += Issue(Kind.BATTERY_OPTIMIZED, Severity.WARN)
         if (s.overlayRequired && !s.overlayGranted) out += Issue(Kind.OVERLAY_DENIED, Severity.WARN)
         if (s.fullScreenIntentAllowed == false) out += Issue(Kind.FULLSCREEN_DENIED, Severity.WARN)
+        if (!s.telecomPrefIsApp && s.telecomAccountEnabled == false) {
+            out += Issue(Kind.TELECOM_ACCOUNT_DISABLED, Severity.WARN)
+        }
         return out
     }
 
@@ -122,7 +130,8 @@ object PushHealth {
         Kind.BATTERY_OPTIMIZED,
         Kind.HIBERNATION_SOON,
         Kind.OVERLAY_DENIED,
-        Kind.FULLSCREEN_DENIED -> true
+        Kind.FULLSCREEN_DENIED,
+        Kind.TELECOM_ACCOUNT_DISABLED -> true
         Kind.PUSH_TOKEN_MISSING,
         Kind.PUSH_REGISTRATION_STALE -> false
     }
@@ -214,6 +223,8 @@ object PushHealth {
             fullScreenIntentAllowed = st.fullScreenIntentAllowed,
             lastUserOpenAt = t.lastUserOpenAt,
             lastPushRegisteredAt = t.lastPushRegisteredAt,
+            telecomAccountEnabled = st.telecomAccountEnabled,
+            telecomPrefIsApp = cfg.telecomPref == TelecomTierManager.Pref.APP,
         )
     }
 }

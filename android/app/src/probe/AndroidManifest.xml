@@ -18,6 +18,7 @@
         <activity android:name=".MainActivity" tools:node="remove" />
         <activity android:name=".CallActivity" tools:node="remove" />
         <service android:name=".BridgeService" tools:node="remove" />
+        <service android:name=".SipConnectionService" tools:node="remove" />
         <receiver android:name=".BootReceiver" tools:node="remove" />
         <receiver android:name=".HealthCheckReceiver" tools:node="remove" />
 

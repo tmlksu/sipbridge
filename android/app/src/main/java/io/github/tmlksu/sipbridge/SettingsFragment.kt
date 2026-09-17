@@ -58,6 +58,9 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
     private lateinit var tvPermMic: TextView
     private lateinit var tvPermHibernation: TextView
     private lateinit var rowPermHibernation: View
+    private lateinit var rowTelecom: View
+    private lateinit var tvTelecomValue: TextView
+    private lateinit var tvTelecomState: TextView
     private lateinit var tvSamsungGuide: TextView
     private lateinit var tvFooter: TextView
     private lateinit var cardSetup: View
@@ -132,6 +135,10 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         tvPermMic = view.findViewById(R.id.tvPermMic)
         tvPermHibernation = view.findViewById(R.id.tvPermHibernation)
         rowPermHibernation = view.findViewById(R.id.rowPermHibernation)
+        rowTelecom = view.findViewById(R.id.rowTelecom)
+        tvTelecomValue = view.findViewById(R.id.tvTelecomValue)
+        tvTelecomState = view.findViewById(R.id.tvTelecomState)
+        rowTelecom.setOnClickListener { openTelecomChoice() }
         tvSamsungGuide = view.findViewById(R.id.tvSamsungGuide)
         tvSamsungGuide.setOnClickListener { openAppDetails() }
         tvFooter = view.findViewById(R.id.tvFooter)
@@ -370,6 +377,8 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
                 tvPermHibernation.text = if (sys.hibernationExempt) getString(R.string.settings_perm_allowed)
                 else getString(R.string.settings_perm_denied)
             }
+            // 通話画面 (Telecom 非対応端末では行ごと出さない)。
+            refreshTelecomRow(ctx, cfg, sys)
             // Samsung 端末のみ One UI のスリープ案内 (§6.0 B は API では取れないため案内だけ)。
             tvOverlayWarn.visibility =
                 if (cfg.overlayEnabled && !sys.overlayGranted) View.VISIBLE else View.GONE
@@ -580,6 +589,57 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             return
         }
         requestRowPermission.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+    }
+
+    // ---- 通話画面 (Telecom 統合) ----
+
+    /** 通話画面行の表示。Telecom 非対応端末では行ごと出さない。 */
+    private fun refreshTelecomRow(ctx: android.content.Context, cfg: BridgeConfigData, sys: SystemStatus) {
+        if (!TelecomCompat.hasTelecom(ctx)) {
+            rowTelecom.visibility = View.GONE
+            tvTelecomState.visibility = View.GONE
+            return
+        }
+        rowTelecom.visibility = View.VISIBLE
+        tvTelecomState.visibility = View.VISIBLE
+        tvTelecomValue.text = when (cfg.telecomPref) {
+            TelecomTierManager.Pref.AUTO -> getString(R.string.settings_telecom_auto)
+            TelecomTierManager.Pref.SYSTEM -> getString(R.string.settings_telecom_system)
+            TelecomTierManager.Pref.APP -> getString(R.string.settings_telecom_app)
+        }
+        tvTelecomState.text = when {
+            cfg.telecomPref == TelecomTierManager.Pref.APP ->
+                getString(R.string.settings_telecom_state_app)
+            sys.telecomAccountEnabled == true ->
+                getString(R.string.settings_telecom_state_system)
+            cfg.telecomPref == TelecomTierManager.Pref.SYSTEM ->
+                getString(R.string.settings_telecom_state_app_disabled)
+            else -> getString(R.string.settings_telecom_state_app)
+        }
+    }
+
+    /** 通話画面の方式を選択するダイアログ。選択で保存し `sync` を呼ぶ。 */
+    private fun openTelecomChoice() {
+        val ctx = requireContext()
+        val prefs = TelecomTierManager.Pref.entries.toTypedArray()
+        val labels = prefs.map {
+            when (it) {
+                TelecomTierManager.Pref.AUTO -> getString(R.string.settings_telecom_auto)
+                TelecomTierManager.Pref.SYSTEM -> getString(R.string.settings_telecom_system)
+                TelecomTierManager.Pref.APP -> getString(R.string.settings_telecom_app)
+            }
+        }.toTypedArray()
+        val cur = BridgeConfig.load(ctx).telecomPref
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.settings_row_telecom)
+            .setSingleChoiceItems(labels, prefs.indexOf(cur)) { d, which ->
+                BridgeConfig.save(ctx, BridgeConfig.load(ctx).copy(telecomPref = prefs[which]))
+                TelecomTierManager.sync(ctx)
+                d.dismiss()
+                refreshAll()
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
     }
 
     /** §6.4 権限カードの「アプリの休止を無効化」行。 */
