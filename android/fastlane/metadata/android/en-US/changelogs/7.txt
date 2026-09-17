@@ -1,0 +1,2 @@
+* Fixed the OS native in-call screen never engaging on Android 12 and later (it stayed on the app's own screen even with the calling account enabled)
+* Enabling the calling account or granting the phone permissions now re-tries the native screen right away (previously, once it fell back to the app's own screen it stayed there until an app or OS update)

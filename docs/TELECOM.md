@@ -151,16 +151,24 @@ Echo Show 5 には **`com.android.server.telecom` パッケージが入ってい
 self-managed (ティア B) が成立してしまう。そうなると受話口の無い端末向けの
 スピーカー強制 (`applyInCallAudioRoute`) が飛ばされ、本番の Echo Show の挙動が変わる。
 
+feature の有無で弾けるが、**feature 名は 2 つある**。
+`android.software.connectionservice` (`FEATURE_CONNECTION_SERVICE`) は **API 30 で非推奨**になり
+`android.software.telecom` (`FEATURE_TELECOM`) に置き換わったため、**新しい端末は旧名を宣言しない**。
+
 実測した差 (2026-09-17):
 
-| | Galaxy S25 / P780 | Echo Show 5 |
-|---|---|---|
-| `android.software.connectionservice` | **あり** | 無し |
-| `android.hardware.telephony` | あり | 無し |
-| InCallService (`cmd package query-services -a android.telecom.InCallService`) | あり | **0 件** |
-| `telecom get-default-dialer` | `com.google.android.dialer` | `null` |
+| | Galaxy S25 (Android 16) | TINNO P780 (Android 11) | Echo Show 5 (API 30) |
+|---|---|---|---|
+| `android.software.telecom` | **あり** | — | 無し |
+| `android.software.connectionservice` | **無し** | **あり** | 無し |
+| `android.hardware.telephony` | あり | あり | 無し |
+| InCallService | あり | あり | **0 件** |
+| `telecom get-default-dialer` | Samsung の dialer | `com.google.android.dialer` | `null` |
 
-→ `PackageManager.FEATURE_CONNECTION_SERVICE` を併せて見ること。
+→ **両方の feature 名を OR で見ること。**
+v1.5 は旧名だけを見ていたため、**S25 で PhoneAccount が一切登録されず、
+通話アカウントを有効にしてもティア C から出られなかった** (v1.5.1 で修正)。
+片方だけ見ると、開発に使った端末では通るのに本命の端末で静かに死ぬ。
 
 ### 3.5c 設定を「アプリ独自」→「自動」に戻すと有効化が外れる (2026-09-17 追記)
 
@@ -252,7 +260,18 @@ Echo Show 向けの大きいボタン UI・オーバーレイの通話ピルは�
 Activity 起動に必要)。新規インストール直後に権限が無い状態では `CallActivity` が上がらず、
 2.5 秒後の着信通知にフォールバックする — これは v1.5 以前からの挙動で、変わっていない。
 
-S25 での確認 (One UI 8 のティア A・Bluetooth 経路・SIM と併存する発信アカウント選択) は未実施。
+### 6.2 v1.5.1 の実機 E2E (Galaxy S25 / Android 16 / One UI 8.0 / 2026-09-17)
+
+| 項目 | 結果 |
+|---|---|
+| PhoneAccount の登録 (managed / self-managed) | OK (v1.5 では登録すらされなかった。§3.5b) |
+| 有効化後のティア判定 | OK (`prop=[]` = managed) |
+| ティア A 着信: **One UI 標準の通話画面** | OK。前面は `com.samsung.android.incallui/.InCallActivity` |
+| 応答 (`KEYCODE_CALL`) → 双方向 RTP | OK。319 パケット |
+| 切断 → Telecom の呼が消える | OK (`mCalls:` が空、Asterisk 側も 0 channels) |
+| 既定の発信アカウント (SIM) への影響 | 無し (`defaultOutgoing` は SIM のまま) |
+
+Bluetooth 経路と、標準ダイヤラー/連絡先からの内線発信 (SIM と併存する発信アカウント選択) は未実施。
 
 ## 7. プローブの使い方
 
