@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Telecom 統合 (OS 標準の通話画面) の実機検証専用ビルド。
+     applicationId は `.probe` を付けた別 ID なので、本番の sipbridge を
+     アンインストールせずに同居できる (設定・認証情報を壊さない)。
+     本番側のコンポーネントは全部外し、プローブ画面だけの単機能アプリにする。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <application
+        android:label="sipbridge probe"
+        tools:replace="android:label">
+
+        <!-- 本番の常駐・通話まわりは probe ビルドには載せない
+             (誤って relay に接続したり、起動時に常駐したりしないため) -->
+        <activity android:name=".MainActivity" tools:node="remove" />
+        <activity android:name=".CallActivity" tools:node="remove" />
+        <service android:name=".BridgeService" tools:node="remove" />
+        <receiver android:name=".BootReceiver" tools:node="remove" />
+        <receiver android:name=".HealthCheckReceiver" tools:node="remove" />
+
+        <activity
+            android:name=".probe.ProbeActivity"
+            android:exported="true"
+            android:label="sipbridge probe"
+            android:theme="@android:style/Theme.Material.Light">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- adb が使える端末では broadcast からも叩ける (scripts/telecom-probe.sh) -->
+        <receiver
+            android:name=".probe.TelecomProbeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.tmlksu.sipbridge.PROBE" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".probe.ProbeConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
