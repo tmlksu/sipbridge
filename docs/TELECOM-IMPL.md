@@ -42,7 +42,8 @@ object TelecomCompat {
 
     fun handle(ctx: Context, id: String): PhoneAccountHandle
 
-    /** 端末に Telecom があるか (TelecomManager + FEATURE_CONNECTION_SERVICE。TELECOM.md §3.5b)。 */
+    /** 端末に Telecom があるか (TelecomManager + FEATURE_TELECOM または
+     *  FEATURE_CONNECTION_SERVICE。**両方の feature 名を見ること**。TELECOM.md §3.5b)。 */
     fun hasTelecom(ctx: Context): Boolean
 
     /** managed アカウントを登録する。成功で true。 */
