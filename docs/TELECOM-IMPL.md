@@ -42,7 +42,7 @@ object TelecomCompat {
 
     fun handle(ctx: Context, id: String): PhoneAccountHandle
 
-    /** 端末に Telecom があるか (Echo Show は false になりうる)。 */
+    /** 端末に Telecom があるか (TelecomManager + FEATURE_CONNECTION_SERVICE。TELECOM.md §3.5b)。 */
     fun hasTelecom(ctx: Context): Boolean
 
     /** managed アカウントを登録する。成功で true。 */
@@ -106,7 +106,7 @@ class SipConnectionService : ConnectionService() {
 | `onAbort()` | `ACT_HANGUP` |
 | `onPlayDtmfTone(c)` | `CallHub.rtp?.sendDtmf(c)` (in-band。relay には送らない) |
 | `onStopDtmfTone()` | 何もしない (in-band は 120ms 固定長) |
-| `onCallAudioStateChanged(s)` | `CallHub.rtp?.muted = s.isMuted`、経路は `AudioRoute` に反映 (§5) |
+| `onCallAudioStateChanged(s)` | `CallHub.rtp?.muted = s.isMuted` **のみ**。経路は Telecom に任せる (§5) |
 | `onSilence()` | 何もしない (着信音は Telecom 側) |
 | `onStateChanged(state)` | ログのみ |
 
@@ -300,10 +300,11 @@ dialFromAnywhere(to):
   `AudioRoute.setSpeaker(am, route == ROUTE_SPEAKER)` を反映する。
   ただし `restoreAudioRoute()` は現行どおり終了時に呼ぶ (no-op になる)。
 - ミュートは `CallAudioState.isMuted` → `CallHub.rtp?.muted`。
-  自前 UI のミュートボタンは、ティア A/B のときは
-  `TelecomCallRegistry.connection?.onCallAudioStateChanged` を待つのではなく
-  `connection.setAudioRoute` ではなく **`Connection` の `onCallAudioStateChanged` に任せる**
-  (= 自前 UI では触らない。ティア A では自前 UI が出ないので実害は無い)。
+- **`onCallAudioStateChanged` で `AudioRoute` を触ってはいけない** (レビューで判明)。
+  API 31+ の `AudioRoute.setSpeaker(am, false)` は `setCommunicationDevice(EARPIECE)` に
+  なるため、Telecom が選んだ経路 (Bluetooth・有線ヘッドセット) を**後勝ちで奪う**。
+  ティア A で OS 画面から Bluetooth を選んでも受話口に引き戻されてしまう。
+  ティア A/B では経路は Telecom に任せ、反映するのは**ミュートだけ**にする。
 - ティア C は現行のまま一切変えない。
 
 ## 6. マニフェスト

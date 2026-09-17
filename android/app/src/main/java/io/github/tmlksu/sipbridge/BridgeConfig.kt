@@ -32,7 +32,13 @@ data class BridgeConfigData(
     /** §6.5 常駐通知を静音チャンネルに出す (既定 OFF)。着信チャンネルは影響を受けない。 */
     val serviceNotificationQuiet: Boolean = false,
     /** relay の X-Device-Id。初回生成し端末に固定。 */
-    val deviceId: String = ""
+    val deviceId: String = "",
+    /** 通話画面の方式 (自動 / OS 標準 / アプリ独自)。既定 AUTO。 */
+    val telecomPref: TelecomTierManager.Pref = TelecomTierManager.Pref.AUTO,
+    /** 学習した上限ティア。ティア落ちのたびに下がる。既定 MANAGED。 */
+    val telecomMaxTier: CallTier = CallTier.MANAGED,
+    /** 学習をリセットする条件の指紋。 */
+    val telecomEnvFingerprint: String = "",
 )
 
 /**
@@ -52,6 +58,10 @@ object BridgeConfig {
         } catch (e: Exception) {
             BridgeMode.PERSISTENT
         }
+        // enum は name で保存し、未知の値は既定に落とす。
+        val telecomPref = TelecomTierManager.prefFromName(p.getString("telecomPref", null))
+        val telecomMaxTier =
+            TelecomTierManager.tierFromName(p.getString("telecomMaxTier", null))
         var deviceId = p.getString("deviceId", "") ?: ""
         if (deviceId.isBlank()) {
             deviceId = UUID.randomUUID().toString()
@@ -72,7 +82,10 @@ object BridgeConfig {
             speakerOnAnswer = p.getBoolean("speakerOnAnswer", false),
             deviceContactsEnabled = p.getBoolean("deviceContactsEnabled", false),
             serviceNotificationQuiet = p.getBoolean("serviceNotificationQuiet", false),
-            deviceId = deviceId
+            deviceId = deviceId,
+            telecomPref = telecomPref,
+            telecomMaxTier = telecomMaxTier,
+            telecomEnvFingerprint = p.getString("telecomEnvFingerprint", "") ?: ""
         )
     }
 
@@ -95,6 +108,9 @@ object BridgeConfig {
             .putBoolean("deviceContactsEnabled", d.deviceContactsEnabled)
             .putBoolean("serviceNotificationQuiet", d.serviceNotificationQuiet)
             .putString("deviceId", keepId.ifBlank { UUID.randomUUID().toString() })
+            .putString("telecomPref", d.telecomPref.name)
+            .putString("telecomMaxTier", d.telecomMaxTier.name)
+            .putString("telecomEnvFingerprint", d.telecomEnvFingerprint)
             .apply()
     }
 
