@@ -21,7 +21,7 @@ import androidx.core.content.ContextCompat
  * 文字列 extras: relayUrl, accessClientId, accessClientSecret, devToken,
  * sipUser, sipPassword, sipDisplay, mode (PERSISTENT|PUSH), micGain,
  * overlayEnabled, autostart, speakerOnAnswer (true/false),
- * deviceContactsEnabled (true/false),
+ * deviceContactsEnabled (true/false), telecomPref (AUTO|SYSTEM|APP),
  * restart (true なら BridgeService を再起動)。
  * boolean extra として渡された場合 (ez) も受け付ける。
  */
@@ -67,9 +67,17 @@ class DebugConfigReceiver : BroadcastReceiver() {
         boolExtra(intent, "autostart")?.let { d = d.copy(autostart = it); touched = true }
         boolExtra(intent, "speakerOnAnswer")?.let { d = d.copy(speakerOnAnswer = it); touched = true }
         boolExtra(intent, "deviceContactsEnabled")?.let { d = d.copy(deviceContactsEnabled = it); touched = true }
+        // 通話画面の方式 (AUTO|SYSTEM|APP)。ティア落ちの E2E (ops/telecom-e2e.sh) から使う。
+        intent.getStringExtra("telecomPref")?.let {
+            runCatching { TelecomTierManager.Pref.valueOf(it.trim().uppercase()) }.onSuccess { p ->
+                d = d.copy(telecomPref = p); touched = true
+            }
+        }
 
         if (touched) {
             BridgeConfig.save(ctx.applicationContext, d)
+            // 通話画面の方式を変えたら PhoneAccount の登録/解除を追随させる。
+            runCatching { TelecomTierManager.sync(ctx.applicationContext) }
             Log.i(TAG, "config updated via adb")
         }
         if (boolExtra(intent, "restart") == true) {

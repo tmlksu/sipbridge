@@ -1,0 +1,5 @@
+* Calls can now use the OS native in-call screen (Settings > Call screen). Dial extensions straight from the stock phone app or contacts
+* Devices that don't support it, or where the calling account is turned off, keep using the app's own call screen (chosen automatically)
+* If the native screen ever fails to appear on a device, the app remembers and defaults to its own screen there (re-checked after an app or OS update)
+* Added "Enable calling account" to the setup sheet; the daily health check also warns when it gets turned off
+* No behaviour change on devices without telephony, such as the Echo Show
