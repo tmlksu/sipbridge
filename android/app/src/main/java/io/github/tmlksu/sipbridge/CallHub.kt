@@ -39,6 +39,9 @@ object CallHub {
     @Volatile var session: CallSession? = null
     @Volatile var rtp: RtpEngine? = null
     @Volatile var micGain: Float = 2.0f
+    /** この呼のティア。呼ごとにセットアップ時点で確定し、通話中は変えない。
+     *  ティア A のとき [CallActivity] は誤って開かれても `finish()` する。 */
+    @Volatile var tier: CallTier = CallTier.LEGACY
 
     interface StateListener { fun onChanged() }
     private val listeners = mutableSetOf<StateListener>()

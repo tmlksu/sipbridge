@@ -49,11 +49,18 @@ class SetupSheet : BottomSheetDialogFragment() {
                     )
                 }
             }
+            if (ctx != null && item == Item.TELECOM_ACCOUNT &&
+                SystemStatus.hasPermission(ctx, Manifest.permission.CALL_PHONE) &&
+                SystemStatus.hasPermission(ctx, Manifest.permission.READ_PHONE_STATE)
+            ) {
+                // 両方揃ったので有効化画面へ進む (片方だけではティア A が成立しない)。
+                SystemStatus.startFirstResolvable(ctx, TelecomCompat.enableAccountIntents(ctx))
+            }
             refresh()
         }
 
     private enum class Item {
-        MIC, NOTIFICATIONS, BATTERY, HIBERNATION, OVERLAY, FULLSCREEN,
+        MIC, NOTIFICATIONS, BATTERY, HIBERNATION, OVERLAY, TELECOM_ACCOUNT, FULLSCREEN,
     }
 
     override fun onCreateView(
@@ -78,9 +85,10 @@ class SetupSheet : BottomSheetDialogFragment() {
         rows.removeAllViews()
         val inflater = LayoutInflater.from(ctx)
         for (item in Item.entries) {
-            // 非対応端末では行自体を出さない (休止・全画面)。
+            // 非対応端末では行自体を出さない (休止・全画面・通話アカウント)。
             if (item == Item.HIBERNATION && status.hibernationExempt == null) continue
             if (item == Item.FULLSCREEN && status.fullScreenIntentAllowed == null) continue
+            if (item == Item.TELECOM_ACCOUNT && status.telecomAccountEnabled == null) continue
             rows.addView(makeRow(inflater, item, status))
         }
     }
@@ -91,6 +99,7 @@ class SetupSheet : BottomSheetDialogFragment() {
         Item.BATTERY -> s.ignoringBatteryOptimizations
         Item.HIBERNATION -> s.hibernationExempt == true
         Item.OVERLAY -> s.overlayGranted
+        Item.TELECOM_ACCOUNT -> s.telecomAccountEnabled == true
         Item.FULLSCREEN -> s.fullScreenIntentAllowed == true
     }
 
@@ -104,6 +113,7 @@ class SetupSheet : BottomSheetDialogFragment() {
         Item.BATTERY -> R.string.setup_item_battery
         Item.HIBERNATION -> R.string.setup_item_hibernation
         Item.OVERLAY -> R.string.setup_item_overlay
+        Item.TELECOM_ACCOUNT -> R.string.setup_item_telecom
         Item.FULLSCREEN -> R.string.setup_item_fullscreen
     }
 
@@ -113,14 +123,26 @@ class SetupSheet : BottomSheetDialogFragment() {
         Item.BATTERY -> R.string.setup_item_battery_desc
         Item.HIBERNATION -> R.string.setup_item_hibernation_desc
         Item.OVERLAY -> R.string.setup_item_overlay_desc
+        Item.TELECOM_ACCOUNT -> R.string.setup_item_telecom_desc
         Item.FULLSCREEN -> R.string.setup_item_fullscreen_desc
     }
+
+    /** 通話アカウント行の説明。電話の権限不足が原因のときはその旨を出す。 */
+    private fun descResFor(item: Item, s: SystemStatus): Int =
+        if (item == Item.TELECOM_ACCOUNT &&
+            s.telecomAccountEnabled == false &&
+            (!s.callPhoneGranted || !s.readPhoneStateGranted)
+        ) {
+            R.string.setup_item_telecom_desc_need_permission
+        } else {
+            descRes(item)
+        }
 
     private fun makeRow(inflater: LayoutInflater, item: Item, s: SystemStatus): View {
         val row = inflater.inflate(R.layout.item_setup_row, rows, false)
         val ctx = requireContext()
         row.findViewById<TextView>(R.id.tvSetupItemTitle).text = getString(titleRes(item))
-        row.findViewById<TextView>(R.id.tvSetupItemDesc).text = getString(descRes(item))
+        row.findViewById<TextView>(R.id.tvSetupItemDesc).text = getString(descResFor(item, s))
         val badge = row.findViewById<TextView>(R.id.tvSetupItemBadge)
         val btn = row.findViewById<MaterialButton>(R.id.btnSetupItemAction)
         if (isDone(item, s)) {
@@ -164,7 +186,32 @@ class SetupSheet : BottomSheetDialogFragment() {
             Item.BATTERY -> openOrToast(SystemStatus.batteryIntents(ctx))
             Item.HIBERNATION -> openOrToast(SystemStatus.hibernationIntents(ctx))
             Item.OVERLAY -> openOrToast(SystemStatus.overlayIntent(ctx))
+            Item.TELECOM_ACCOUNT -> onTelecomAction()
             Item.FULLSCREEN -> openOrToast(SystemStatus.fullscreenIntent(ctx))
+        }
+    }
+
+    /**
+     * 通話アカウント行: CALL_PHONE と READ_PHONE_STATE が両方未許可なら同時に要求し、
+     * 両方揃ってから発信アカウント設定 (有効化画面) へ進む。
+     * `getCallCapablePhoneAccounts()` には READ_PHONE_STATE が必須で、
+     * 片方だけではティア A が成立しない。
+     * 未許可でもアプリは従来どおり動く (ティア C に落ちるだけ) ため推奨扱い。
+     */
+    private fun onTelecomAction() {
+        val ctx = requireContext()
+        val missing = buildList {
+            if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) !=
+                PackageManager.PERMISSION_GRANTED
+            ) add(Manifest.permission.CALL_PHONE)
+            if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_PHONE_STATE) !=
+                PackageManager.PERMISSION_GRANTED
+            ) add(Manifest.permission.READ_PHONE_STATE)
+        }
+        if (missing.isNotEmpty()) {
+            requestRuntime(missing, Item.TELECOM_ACCOUNT)
+        } else {
+            openOrToast(TelecomCompat.enableAccountIntents(ctx))
         }
     }
 

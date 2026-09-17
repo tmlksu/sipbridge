@@ -1,10 +1,16 @@
 package io.github.tmlksu.sipbridge
 
+import android.Manifest
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.Bundle
+import android.telecom.DisconnectCause
+import android.telecom.TelecomManager
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -40,7 +46,18 @@ class BridgeService : Service(), RelayClient.Listener {
         const val ACT_REREGISTER_PUSH = "sipbridge.REREGISTER_PUSH"
         const val ACT_UI_SHOWN = "sipbridge.UI_SHOWN"
         const val ACT_UI_HIDDEN = "sipbridge.UI_HIDDEN"
+        /** `SipConnectionService.onCreateOutgoingConnection` からの発信継続
+         *  (`CallActivity` は起動しない — OS 標準画面が出ているため)。 */
+        const val ACT_DIAL_TELECOM = "sipbridge.DIAL_TELECOM"
+        /** self-managed の `onShowIncomingCallUi` からの自前着信 UI 要求。 */
+        const val ACT_SHOW_INCOMING_UI = "sipbridge.SHOW_INCOMING_UI"
         const val EXTRA_TO = "to"
+        /** [ACT_DIAL_TELECOM] で ConnectionService が渡すティア名 ([CallTier])。 */
+        const val EXTRA_TELECOM_TIER = "telecomTier"
+
+        /** `addNewIncomingCall` / `placeCall` の後、この時間以内に
+         *  `onCreate...Connection` が来なければ沈黙失敗としてティア C に落とす。 */
+        const val TELECOM_WATCHDOG_MS = 2000L
 
         /** PUSH モードで通話終了後に切断するまでの猶予。 */
         const val PUSH_IDLE_DISCONNECT_MS = 60_000L
@@ -101,6 +118,15 @@ class BridgeService : Service(), RelayClient.Listener {
     private var audioRouteSet: Boolean = false
     /** 通話中ピル代替 (オーバーレイ権限無し) の常駐通知ティッカー。 */
     private var inCallNotifyTick: Runnable? = null
+    /** この呼のティア。呼ごとにセットアップ時点で確定し、通話中は変えない。
+     *  `CallHub.resetCall()` のタイミングで LEGACY に戻す。 */
+    @Volatile private var currentTier: CallTier = CallTier.LEGACY
+    /** Telecom ウォッチドッグ (沈黙失敗の検出用)。 */
+    private var telecomWatchdog: Runnable? = null
+    /** Telecom 生成待ちの呼の向き (`onCreate...Failed` 即時フォールバックの振り分け用)。 */
+    @Volatile private var telecomPendingIncoming = false
+    /** Telecom 生成待ちの発信先 (同上)。 */
+    @Volatile private var telecomPendingTo: String? = null
 
     inner class LocalBinder : Binder() { fun service(): BridgeService = this@BridgeService }
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -108,6 +134,8 @@ class BridgeService : Service(), RelayClient.Listener {
     override fun onCreate() {
         super.onCreate()
         running = true
+        // Telecom アカウントの登録/解除 (起動時)。失敗しても何も起きない。
+        TelecomTierManager.sync(this)
         NotificationHelper.ensureChannels(this)
         // §6.3 定期チェックの登録 (Service 生成のたびに。重複登録は上書きされるだけ)。
         HealthCheckReceiver.schedule(this)
@@ -251,6 +279,30 @@ class BridgeService : Service(), RelayClient.Listener {
             }
             ACT_UI_SHOWN -> onCallUiShown()
             ACT_UI_HIDDEN -> onCallUiHidden()
+            ACT_DIAL_TELECOM -> {
+                val to = intent.getStringExtra(EXTRA_TO).orEmpty()
+                // 進行中の呼があるときはティアを上書きしない。遅れて届いた
+                // Connection はその場で切って何もしない (currentTier は触らない)。
+                // 宛先が空の要求も同じく捨てる。
+                if (to.trim().isEmpty() || CallHub.state != CallHub.State.IDLE) {
+                    telecomPendingIncoming = false
+                    telecomPendingTo = null
+                    TelecomCallRegistry.setDisconnected(DisconnectCause.ERROR)
+                    TelecomCallRegistry.clear()
+                } else {
+                    telecomPendingIncoming = false
+                    telecomPendingTo = null
+                    // 標準ダイヤラー起点の発信は dialFromAnywhere を通らないため、
+                    // currentTier がまだ LEGACY のまま。ここで確定させないと
+                    // 自前の通話画面が二重に出て、音声経路も Telecom と取り合いになる。
+                    val tier =
+                        TelecomTierManager.tierFromName(intent.getStringExtra(EXTRA_TELECOM_TIER))
+                    currentTier = tier
+                    CallHub.tier = tier
+                    dialViaRelay(to, showUi = false)
+                }
+            }
+            ACT_SHOW_INCOMING_UI -> presentIncomingLegacy()
             ACT_STOP -> {
                 stopSelf()
                 return START_NOT_STICKY
@@ -277,7 +329,8 @@ class BridgeService : Service(), RelayClient.Listener {
         overlay?.hide()
         runCatching { wifiLock?.release() }
         runCatching { wakeLock?.release() }
-        CallHub.resetCall()
+        TelecomCallRegistry.clear()
+        resetCallState()
         super.onDestroy()
     }
 
@@ -367,7 +420,7 @@ class BridgeService : Service(), RelayClient.Listener {
                 }
                 stopCallMedia()
                 restoreAudioRoute()
-                CallHub.resetCall()
+                resetCallState()
                 hideInCallPill()
                 overlay?.hide()
                 runCatching {
@@ -437,6 +490,7 @@ class BridgeService : Service(), RelayClient.Listener {
             CallHub.session = RelayCallSession(v.callId, CallHub.from, CallHub.display, 0, canAnswer = false)
             CallHub.notifyChanged()
             CallHub.updateStatus(if (v.early) "呼出中 (早期メディアあり)" else "呼出中…")
+            TelecomCallRegistry.setDialing()
         }
     }
 
@@ -453,11 +507,14 @@ class BridgeService : Service(), RelayClient.Listener {
         startCallMedia(v.pt)
         CallHub.notifyChanged()
         CallHub.updateStatus("通話中")
+        TelecomCallRegistry.setActive()
         overlay?.hide()
         runCatching {
             (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
                 .cancel(NotificationHelper.ID_INCOMING)
         }
+        // ティア A では OS 標準画面が出ているため自前 UI は出さない。
+        if (suppressOwnUi()) return
         // 通話画面を前面へ。ただし発信を自分で縮小している間は割り込まず、
         // ピル (または代替通知) を通話中表示に切り替えるだけにする。
         if (wasOutgoing && !uiVisible) {
@@ -487,6 +544,8 @@ class BridgeService : Service(), RelayClient.Listener {
         }
         stopCallMedia()
         restoreAudioRoute()
+        TelecomCallRegistry.setDisconnected(TelecomCompat.disconnectCauseFor(v.reason))
+        TelecomCallRegistry.clear()
         val msg = when (v.reason) {
             "answered_elsewhere" -> "他端末で応答"
             "bye" -> "通話終了"
@@ -495,7 +554,7 @@ class BridgeService : Service(), RelayClient.Listener {
             "timeout" -> "無応答タイムアウト (${v.code})"
             else -> "終了 (${v.reason} ${v.code})"
         }
-        CallHub.resetCall()
+        resetCallState()
         hideInCallPill()
         overlay?.hide()
         (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
@@ -546,6 +605,52 @@ class BridgeService : Service(), RelayClient.Listener {
         CallHub.notifyChanged()
         Log.i(TAG, "incoming from $from ($callId)")
         uiVisible = false
+        val tier = TelecomTierManager.decide(this, incoming = true)
+        if (tier != CallTier.LEGACY) {
+            // SELF_MANAGED は直前にも許可を確認し、false ならティア落ち。
+            if (tier == CallTier.SELF_MANAGED &&
+                !TelecomCompat.isSelfManagedUsable(this, incoming = true)
+            ) {
+                degradeIncoming(tier, "self-managed not permitted")
+                return
+            }
+            currentTier = tier
+            CallHub.tier = tier
+            val accountId = if (tier == CallTier.MANAGED) TelecomCompat.ACCOUNT_ID_MANAGED
+            else TelecomCompat.ACCOUNT_ID_SELF
+            val extras = Bundle().apply {
+                putParcelable(
+                    TelecomManager.EXTRA_INCOMING_CALL_ADDRESS,
+                    Uri.fromParts("tel", from, null)
+                )
+                putParcelable(
+                    TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE,
+                    TelecomCompat.handle(this@BridgeService, accountId)
+                )
+                putString(TelecomCompat.EXTRA_CALL_ID, callId)
+            }
+            telecomPendingIncoming = true
+            telecomPendingTo = null
+            armTelecomWatchdog(
+                onTimeout = { degradeIncoming(tier, "no onCreateIncomingConnection") },
+                onFailed = { degradeIncoming(tier, "onCreateIncomingConnectionFailed") },
+            )
+            // relay には何も変化を返さない。180 を返したままで 25 秒タイムアウトの内側。
+            val ok = TelecomCompat.addNewIncomingCall(this, accountId, extras)
+            Log.i(TAG, "incoming via telecom tier=$tier ok=$ok")
+            if (!ok) degradeIncoming(tier, "addNewIncomingCall false")
+            return
+        }
+        presentIncomingLegacy()
+    }
+
+    /**
+     * 現行 `presentIncoming` の UI 部分を切り出したもの (ティア C の経路)。
+     * ティア A/B からのフォールバックと self-managed の `onShowIncomingCallUi` もここに来る。
+     */
+    private fun presentIncomingLegacy() {
+        // 既に片付いた呼 (終了・応答済み) には UI を出さない。
+        if (CallHub.state != CallHub.State.RINGING || CallHub.outgoing) return
         var activityLaunched = false
         runCatching {
             startActivity(CallOverlayManager.callActivityIntent(this))
@@ -559,6 +664,81 @@ class BridgeService : Service(), RelayClient.Listener {
                 showOverlayBubble()
             }
         }, 2500)
+    }
+
+    /** ティアが MANAGED の呼では自前 UI を出さない (OS 標準の通話中通知があるため)。 */
+    private fun suppressOwnUi(): Boolean = currentTier == CallTier.MANAGED
+
+    /** `CallHub.resetCall()` + ティアを LEGACY に戻す + 待ち状態の片付け。
+     *  WSS 切断後の再 hello で通話畳み込みに来たときも OS の通話画面を残さないよう、
+     *  ここで Telecom の呼を切る。`onEnded`/`reject`/`hangup` 済みなら connection は
+     *  null のため二重実行は no-op。 */
+    private fun resetCallState() {
+        TelecomCallRegistry.setDisconnected(DisconnectCause.UNKNOWN)
+        TelecomCallRegistry.clear()
+        cancelTelecomWatchdog()
+        telecomPendingIncoming = false
+        telecomPendingTo = null
+        currentTier = CallTier.LEGACY
+        CallHub.tier = CallTier.LEGACY
+        CallHub.resetCall()
+    }
+
+    /**
+     * Telecom ウォッチドッグ。`onCreate...Connection` / `...Failed` のどちらが来ても解除する。
+     * `Failed` なら即フォールバックする (同じプロセス内のコールバック経由)。
+     */
+    private fun armTelecomWatchdog(onTimeout: () -> Unit, onFailed: () -> Unit) {
+        cancelTelecomWatchdog()
+        TelecomCallRegistry.onCreated = {
+            mainHandler.post {
+                telecomPendingIncoming = false
+                telecomPendingTo = null
+                cancelTelecomWatchdog()
+            }
+        }
+        TelecomCallRegistry.onCreateFailed = { mainHandler.post { onFailed() } }
+        val r = Runnable {
+            telecomWatchdog = null
+            onTimeout()
+        }
+        telecomWatchdog = r
+        mainHandler.postDelayed(r, TELECOM_WATCHDOG_MS)
+    }
+
+    private fun cancelTelecomWatchdog() {
+        telecomWatchdog?.let { mainHandler.removeCallbacks(it) }
+        telecomWatchdog = null
+        TelecomCallRegistry.onCreated = null
+        TelecomCallRegistry.onCreateFailed = null
+    }
+
+    /** 着信のティア落ち: 学習に記録し、ティア C で自前 UI を出す。 */
+    private fun degradeIncoming(tier: CallTier, reason: String) {
+        if (CallHub.state != CallHub.State.RINGING || CallHub.outgoing) return
+        TelecomTierManager.recordDegrade(this, tier, CallTier.LEGACY, reason)
+        cancelTelecomWatchdog()
+        telecomPendingIncoming = false
+        telecomPendingTo = null
+        currentTier = CallTier.LEGACY
+        CallHub.tier = CallTier.LEGACY
+        TelecomCallRegistry.clear()
+        presentIncomingLegacy()
+    }
+
+    /** 発信のティア落ち: 学習に記録し、ティア C で発信し直す。 */
+    private fun degradeOutgoing(tier: CallTier, to: String, reason: String) {
+        // 既に片付いた試行 (成功・終了済み) なら何もしない。
+        if (telecomPendingTo != to) return
+        telecomPendingTo = null
+        telecomPendingIncoming = false
+        TelecomTierManager.recordDegrade(this, tier, CallTier.LEGACY, reason)
+        cancelTelecomWatchdog()
+        currentTier = CallTier.LEGACY
+        CallHub.tier = CallTier.LEGACY
+        TelecomCallRegistry.clear()
+        if (CallHub.state != CallHub.State.IDLE) return
+        dialViaRelay(to, showUi = true)
     }
 
     private fun presentOutgoingRinging(callId: String, to: String) {
@@ -655,6 +835,8 @@ class BridgeService : Service(), RelayClient.Listener {
         getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
 
     private fun showIncomingNotification() {
+        // ティア A では OS 標準の着信表示があるため通知は出さない。
+        if (suppressOwnUi()) return
         runCatching {
             incomingNm().notify(
                 NotificationHelper.ID_INCOMING,
@@ -664,6 +846,8 @@ class BridgeService : Service(), RelayClient.Listener {
     }
 
     private fun showOverlayBubble() {
+        // ティア A では OS 標準画面が出ているためバブルは出さない。
+        if (suppressOwnUi()) return
         if (!BridgeConfig.load(this).overlayEnabled) return
         if (overlay?.canDraw() != true) return
         overlay?.show(CallHub.from, { answerFromAnywhere() }, { rejectFromAnywhere() })
@@ -699,6 +883,8 @@ class BridgeService : Service(), RelayClient.Listener {
      * (呼出中は「<番号> を呼び出し中」) に更新して代替する。
      */
     fun showInCallPill() {
+        // ティア A では OS 標準の通話中通知があるためピルは出さない。
+        if (suppressOwnUi()) return
         val ringingOut = CallHub.state == CallHub.State.RINGING && CallHub.outgoing
         if (CallHub.state != CallHub.State.IN_CALL && !ringingOut) return
         hideInCallPill()
@@ -751,6 +937,9 @@ class BridgeService : Service(), RelayClient.Listener {
      * 変更前のスピーカー状態を覚え、通話終了で元に戻す。
      */
     private fun applyInCallAudioRoute() {
+        // ティア A/B では Telecom がオーディオフォーカスと MODE_IN_COMMUNICATION を
+        // 管理するため、こちらでは経路を触らない (終了時の restore は呼ぶ)。
+        if (currentTier != CallTier.LEGACY) return
         val am = audioManager ?: return
         if (!audioRouteSet) {
             prevSpeakerOn = AudioRoute.isSpeakerOn(am)
@@ -797,7 +986,10 @@ class BridgeService : Service(), RelayClient.Listener {
         CallHub.notifyChanged()
         overlay?.hide()
         runCatching { incomingNm().cancel(NotificationHelper.ID_INCOMING) }
-        startActivity(CallOverlayManager.callActivityIntent(this))
+        // ティア A では OS 標準画面が出ているため自前 UI は出さない。
+        if (!suppressOwnUi()) {
+            startActivity(CallOverlayManager.callActivityIntent(this))
+        }
     }
 
     fun rejectFromAnywhere() {
@@ -809,11 +1001,13 @@ class BridgeService : Service(), RelayClient.Listener {
         } else {
             markHistoryDone(CallHub.callId)
         }
+        TelecomCallRegistry.setDisconnected(DisconnectCause.REJECTED)
+        TelecomCallRegistry.clear()
         CallHub.session?.reject()
         stopCallMedia()
         restoreAudioRoute()
         val hadCall = CallHub.session != null
-        CallHub.resetCall()
+        resetCallState()
         if (!hadCall) CallHub.updateStatus("拒否")
         hideInCallPill()
         overlay?.hide()
@@ -831,12 +1025,14 @@ class BridgeService : Service(), RelayClient.Listener {
             // OUT 未応答は dial 時のエントリ (duration 0) が残る。
             markHistoryDone(CallHub.callId)
         }
+        TelecomCallRegistry.setDisconnected(DisconnectCause.LOCAL)
+        TelecomCallRegistry.clear()
         CallHub.session?.hangup()
         stopCallMedia()
         restoreAudioRoute()
         pendingDial = null
         val hadCall = CallHub.session != null
-        CallHub.resetCall()
+        resetCallState()
         if (!hadCall) CallHub.updateStatus("終了")
         hideInCallPill()
         overlay?.hide()
@@ -846,7 +1042,66 @@ class BridgeService : Service(), RelayClient.Listener {
     fun dialFromAnywhere(to: String) {
         val dest = to.trim()
         if (dest.isEmpty() || CallHub.state != CallHub.State.IDLE) return
-        if (!ensureConnected()) return
+        val tier = TelecomTierManager.decide(this, incoming = false)
+        if (tier != CallTier.LEGACY) {
+            // CALL_PHONE 未許可なら placeCall を試さずその呼だけ LEGACY に落とす
+            // (例外を投げさせない)。学習には記録しない — telecomMaxTier を LEGACY に
+            // 固定すると着信も含めて以後ティア A/B が選ばれなくなるため。
+            if (!hasCallPhonePermission()) {
+                Log.i(TAG, "CALL_PHONE denied, dial via relay (no degrade recorded)")
+            } else {
+                val accountId = if (tier == CallTier.MANAGED) TelecomCompat.ACCOUNT_ID_MANAGED
+                else TelecomCompat.ACCOUNT_ID_SELF
+                val extras = Bundle().apply {
+                    putParcelable(
+                        TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE,
+                        TelecomCompat.handle(this@BridgeService, accountId)
+                    )
+                    putBundle(
+                        TelecomManager.EXTRA_OUTGOING_CALL_EXTRAS,
+                        Bundle().apply { putBoolean(TelecomCompat.EXTRA_FROM_APP, true) }
+                    )
+                }
+                currentTier = tier
+                CallHub.tier = tier
+                telecomPendingIncoming = false
+                telecomPendingTo = dest
+                armTelecomWatchdog(
+                    onTimeout = { degradeOutgoing(tier, dest, "no onCreateOutgoingConnection") },
+                    onFailed = { degradeOutgoing(tier, dest, "onCreateOutgoingConnectionFailed") },
+                )
+                // 続きは onCreateOutgoingConnection からの ACT_DIAL_TELECOM。
+                val ok = TelecomCompat.placeCall(this, dest, extras)
+                Log.i(TAG, "outgoing via telecom tier=$tier ok=$ok")
+                if (ok) return
+                degradeOutgoing(tier, dest, "placeCall false")
+                return
+            }
+        }
+        dialViaRelay(dest, showUi = true)
+    }
+
+    private fun hasCallPhonePermission(): Boolean =
+        checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * 現行 `dialFromAnywhere` の relay 発信部分を切り出したもの。
+     * 標準ダイヤラー起点 (`showUi=false`) では `CallActivity` を起動しない。
+     * 未接続で発信要求されたときは `ensureConnected()` し、駄目なら
+     * OS 画面を畳んで終わる (自前 UI 起点では従来どおり何もしない)。
+     */
+    fun dialViaRelay(to: String, showUi: Boolean = true) {
+        val dest = to.trim()
+        if (dest.isEmpty() || CallHub.state != CallHub.State.IDLE) return
+        if (!ensureConnected()) {
+            if (!showUi) {
+                TelecomCallRegistry.setDisconnected(DisconnectCause.ERROR)
+                TelecomCallRegistry.clear()
+                currentTier = CallTier.LEGACY
+                CallHub.tier = CallTier.LEGACY
+            }
+            return
+        }
         applyInCallAudioRoute()
         CallHub.from = dest
         // P3: 発信先の名前解決 (連絡先一致で CallActivity に名前が出る) と OUT 記録。
@@ -867,7 +1122,10 @@ class BridgeService : Service(), RelayClient.Listener {
             // 接続確立後の hello 受信時 (onHello) に送る
             pendingDial = dest
         }
-        startActivity(CallOverlayManager.callActivityIntent(this))
+        // OS 標準画面が出ている発信 (標準ダイヤラー起点) では自前 UI は出さない。
+        if (showUi) {
+            startActivity(CallOverlayManager.callActivityIntent(this))
+        }
     }
 
     /** T5 用: FCM トークンを保持し、接続中なら即登録する。

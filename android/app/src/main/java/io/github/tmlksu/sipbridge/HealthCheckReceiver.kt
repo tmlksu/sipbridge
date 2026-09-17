@@ -114,6 +114,8 @@ class HealthCheckReceiver : BroadcastReceiver() {
                 ctx.getString(R.string.health_reason_overlay_denied)
             PushHealth.Kind.FULLSCREEN_DENIED ->
                 ctx.getString(R.string.health_reason_fullscreen_denied)
+            PushHealth.Kind.TELECOM_ACCOUNT_DISABLED ->
+                ctx.getString(R.string.health_reason_telecom_disabled)
         }
     }
 }
