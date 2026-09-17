@@ -2,7 +2,6 @@ package io.github.tmlksu.sipbridge
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Bundle
@@ -39,17 +38,30 @@ object TelecomCompat {
         runCatching { ctx.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager }
             .getOrNull()
 
+    /** Telecom の feature 名。API 30 で `connectionservice` → `telecom` に置き換わった。
+     *  定数ではなく文字列で持つ (前者は非推奨、後者は API 30 追加で minSdk 29 より新しい)。 */
+    private const val FEATURE_TELECOM = "android.software.telecom"
+    private const val FEATURE_CONNECTION_SERVICE = "android.software.connectionservice"
+
     /**
-     * 端末に Telecom があるか。`TelecomManager != null` かつ
-     * `FEATURE_CONNECTION_SERVICE` 持ちを見る。
+     * 端末に Telecom があるか。`TelecomManager != null` かつ Telecom の feature 持ちを見る。
+     *
      * Echo Show 5 は `com.android.server.telecom` パッケージだけ持っているため
-     * `getSystemService(TELECOM_SERVICE)` が非 null になり得るが、connectionservice
-     * feature / telephony / InCallService / 既定ダイヤラーが無い。P780 と S25 には
-     * `android.software.connectionservice` がある。feature 要求で Echo Show を弾く。
+     * `getSystemService(TELECOM_SERVICE)` が非 null になり得る (telephony /
+     * InCallService / 既定ダイヤラーは無い)。feature 要求でこれを弾く。
+     *
+     * **feature 名は 2 つとも見ること**。実測 (2026-09-17):
+     * - Galaxy S25 (Android 16 / One UI 8) … `telecom` のみ (**`connectionservice` 無し**)
+     * - TINNO P780 (Android 11)           … `connectionservice` あり
+     * - Echo Show 5 (LineageOS 18.1)      … **どちらも無し**
+     *
+     * 旧名だけを見ると S25 で PhoneAccount が登録されず、ティア C から一生出られない
+     * (v1.5 で実際にそうなった)。
      */
     fun hasTelecom(ctx: Context): Boolean = runCatching {
-        telecom(ctx) != null &&
-            ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_CONNECTION_SERVICE)
+        telecom(ctx) != null && ctx.packageManager.let {
+            it.hasSystemFeature(FEATURE_TELECOM) || it.hasSystemFeature(FEATURE_CONNECTION_SERVICE)
+        }
     }.getOrDefault(false)
 
     /** managed アカウントを登録する。成功で true。 */
