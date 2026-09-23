@@ -18,7 +18,7 @@ func clearEnv(t *testing.T) {
 		"LISTEN", "AUTH_MODE", "CF_TEAM_DOMAIN", "CF_ACCESS_AUD", "DEV_TOKEN",
 		"SIP_HOST", "SIP_PORT", "ASTERISK_HOST", "ASTERISK_PORT",
 		"SIP_USER", "SIP_PASSWORD", "SIP_DISPLAY",
-		"LOCAL_IP", "RTP_PORT_MIN", "RTP_PORT_MAX", "BACKEND",
+		"LOCAL_IP", "RTP_PORT_MIN", "RTP_PORT_MAX", "BACKEND", "RESUME_TIMEOUT_SEC",
 		"LOG_LEVEL", "STATE_FILE", "PUSH_STATE_FILE",
 		"FCM_PROJECT_ID", "FCM_SERVICE_ACCOUNT_FILE",
 	} {
@@ -49,6 +49,9 @@ func TestDefaults(t *testing.T) {
 	if c.SIPPort != 5060 || c.RTPPortMin != 20000 || c.RTPPortMax != 20100 {
 		t.Errorf("ポート既定が不正: %+v", c)
 	}
+	if c.ResumeTimeoutSec != 30 {
+		t.Errorf("ResumeTimeoutSec 既定 = %d", c.ResumeTimeoutSec)
+	}
 	if c.Backend != "fake" || c.LogLevel != "info" {
 		t.Errorf("既定が不正: %+v", c)
 	}
@@ -77,6 +80,9 @@ func TestValidation(t *testing.T) {
 		{"sip backend は SIP_USER 無しでも可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "BACKEND": "sip", "SIP_USER": ""}, true},
 		{"RTP 範囲逆転は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RTP_PORT_MIN": "30000", "RTP_PORT_MAX": "20000"}, false},
 		{"RTP 非整数は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RTP_PORT_MIN": "abc"}, false},
+		{"RESUME_TIMEOUT_SEC 正常", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RESUME_TIMEOUT_SEC": "45"}, true},
+		{"RESUME_TIMEOUT_SEC 0 は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RESUME_TIMEOUT_SEC": "0"}, false},
+		{"RESUME_TIMEOUT_SEC 上限超は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RESUME_TIMEOUT_SEC": "301"}, false},
 		{"不明な loglevel は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "LOG_LEVEL": "verbose"}, false},
 	}
 	for _, tc := range cases {
