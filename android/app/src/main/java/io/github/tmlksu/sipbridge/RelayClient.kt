@@ -20,6 +20,8 @@ import okio.ByteString
  *   指数バックオフで再接続し、接続直後の `hello` で状態同期する (呼び出し側で処理)。
  *   ただし通話中 ([callActive] が true) は relay の resume 猶予内に戻れるよう
  *   バックオフを [CALL_MAX_BACKOFF_SEC] にクランプする。
+ * - 網切替 (Wi-Fi ↔ モバイル) は OkHttp が検知するまで時間がかかるため、
+ *   呼び出し側が [onNetworkChanged] で通知する。
  * - UDP 送受信は一切行わない (端末側 LISTEN ゼロ)。
  */
 class RelayClient(
@@ -95,6 +97,30 @@ class RelayClient(
         }
         runCatching { old?.close(1000, "client disconnect") }
         runCatching { pend?.close(1000, "client disconnect") }
+    }
+
+    /**
+     * 端末のネットワークが切り替わった/失われたときに呼ぶ。
+     * 旧網に紐づいたソケットはブラックホール化して ping タイムアウトまで生きて見えるため、
+     * 明示的に畳んでから再接続する。[available] が true ならバックオフをリセットして即接続する。
+     */
+    fun onNetworkChanged(available: Boolean) {
+        val (old, pend) = synchronized(lock) {
+            if (!wantConnect) return
+            if (available) backoffSec = 1L
+            val o = ws
+            val p = pending
+            if (o == null && p == null) return@synchronized null to null
+            ws = null
+            pending = null
+            connected = false
+            o to p
+        }
+        Log.i(TAG, "network changed (available=$available)")
+        runCatching { old?.cancel() }
+        runCatching { pend?.cancel() }
+        if (old != null) listener.onDisconnected()
+        if (available) handler.post { if (wantConnect) openSocket() } else scheduleReconnect()
     }
 
     fun shutdown() {
