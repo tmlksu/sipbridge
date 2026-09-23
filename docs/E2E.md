@@ -42,7 +42,7 @@ API 34+ (S25) の注意
 
 ## 5. 異常系
 
-- [ ] 通話中に S25 の Wi-Fi を切る → 10 秒以内に再接続 (モバイル回線) で通話継続。10 秒超で relay が BYE
+- [ ] 通話中に S25 の Wi-Fi を切る → `RESUME_TIMEOUT_SEC` (既定 30 秒) 以内に再接続 (モバイル回線) で通話継続。猶予超過で relay が BYE
 - [ ] cloudflared を止める → 端末は「再接続中…」、復旧後に自動で「登録OK」
 - [ ] Service Token を Cloudflare で失効 → 端末に「認証失敗 (403)」
 - [ ] relay 再起動 → Asterisk に再登録、端末は自動再接続
