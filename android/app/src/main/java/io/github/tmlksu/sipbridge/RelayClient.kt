@@ -18,6 +18,8 @@ import okio.ByteString
  *   `X-Client-Version` を必ず付ける。
  * - WS ping/pong 20 秒 (OkHttp の pingInterval)。切断時は 1,2,4,…30 秒の
  *   指数バックオフで再接続し、接続直後の `hello` で状態同期する (呼び出し側で処理)。
+ *   ただし通話中 ([callActive] が true) は relay の resume 猶予内に戻れるよう
+ *   バックオフを [CALL_MAX_BACKOFF_SEC] にクランプする。
  * - UDP 送受信は一切行わない (端末側 LISTEN ゼロ)。
  */
 class RelayClient(
@@ -26,7 +28,9 @@ class RelayClient(
     private val accessClientSecret: String,
     private val devToken: String,
     private val deviceId: String,
-    private val listener: Listener
+    private val listener: Listener,
+    /** 通話中かどうか。true の間は再接続バックオフを短く保つ。 */
+    private val callActive: () -> Boolean = { false }
 ) {
     interface Listener {
         fun onHello(v: RelayProtocol.Hello)
@@ -44,6 +48,8 @@ class RelayClient(
     companion object {
         private const val TAG = "RelayClient"
         private const val MAX_BACKOFF_SEC = 30L
+        /** 通話中の再接続バックオフ上限。relay の resume 猶予より十分短くする。 */
+        private const val CALL_MAX_BACKOFF_SEC = 2L
     }
 
     private val http = OkHttpClient.Builder()
@@ -210,7 +216,8 @@ class RelayClient(
             if (!wantConnect || reconnectPosted) return
             reconnectPosted = true
         }
-        val delay = synchronized(lock) { backoffSec }.coerceAtMost(MAX_BACKOFF_SEC)
+        val cap = if (callActive()) CALL_MAX_BACKOFF_SEC else MAX_BACKOFF_SEC
+        val delay = synchronized(lock) { backoffSec }.coerceAtMost(cap)
         Log.i(TAG, "reconnect in ${delay}s")
         handler.postDelayed({
             synchronized(lock) { reconnectPosted = false }
