@@ -38,6 +38,12 @@ class BridgeMessagingService : FirebaseMessagingService() {
             Log.i(TAG, "incoming 以外 (${data["type"]}) のため無視")
             return
         }
+        // PUSH 待機中の BridgeService はロックを持っていない (issue #19)。この関数を抜けて
+        // FCM の wake lock が切れてから、サービスが接続前にロックを取るまでの間に
+        // CPU が眠らないよう、サービスを起こす前 (deliverToken より前) に橋渡しの
+        // wake lock を取っておく (サービスが自分のロックを取るか、下の起床 Intent の
+        // 処理を終えた時点で放す。最長でも 30 秒で切れる)。
+        BridgeService.holdWakeBridge(this)
         val caller = data["caller"] ?: data["from"]
         Log.i(TAG, "着信 push 受信: callId=${data["callId"]} from=$caller")
         // §6.2 到達性の記録: push が届いた時刻。
@@ -49,6 +55,7 @@ class BridgeMessagingService : FirebaseMessagingService() {
             data["callId"]?.let { putExtra(EXTRA_CALL_ID, it) }
             caller?.let { putExtra(EXTRA_FROM, it) }
             data["display"]?.let { putExtra(EXTRA_DISPLAY, it) }
+            putExtra(BridgeService.EXTRA_WAKE_BRIDGE, true)
         }
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(wake)

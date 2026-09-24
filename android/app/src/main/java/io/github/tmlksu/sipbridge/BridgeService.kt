@@ -71,12 +71,61 @@ class BridgeService : Service(), RelayClient.Listener {
         /** PUSH モードで通話終了後に切断するまでの猶予。 */
         const val PUSH_IDLE_DISCONNECT_MS = 60_000L
 
+        /** PUSH モードのオンデマンド接続の期限 (issue #19)。relay に届かず hello が来ない
+         *  (relay 停止・URL 不正・圏外など) と idle 切断が積まれず、再接続とロックが
+         *  無期限に続くため、接続開始時にこの期限で切断を積んでおく。hello が来れば
+         *  [PUSH_IDLE_DISCONNECT_MS] に積み直され、呼があれば発火時に何もしない。 */
+        const val PUSH_CONNECT_DEADLINE_MS = 180_000L
+
+        /** [holdWakeBridge] を取ってから起こした Intent に付ける。`onStartCommand` の末尾で
+         *  橋渡し wake lock を放してよい印 (付いていない起動 — gms の token 配送など — では
+         *  放さない。後続の起床 Intent の前に放してしまわないため)。 */
+        const val EXTRA_WAKE_BRIDGE = "sipbridge.wakeBridge"
+
         /** wake lock の取得時間。無期限取得は取りこぼし時に端末を起こし続けるため有限にし、
          *  [WAKE_LOCK_RENEW_MS] ごとに取り直す。 */
         private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60 * 1000L
 
         /** wake lock を取り直す間隔 ([WAKE_LOCK_TIMEOUT_MS] より十分短くする)。 */
         private const val WAKE_LOCK_RENEW_MS = 50 * 60 * 1000L
+
+        /** 橋渡し wake lock ([holdWakeBridge]) の上限。サービスが自分のロックを取った時点で
+         *  早めに放すが、起動に失敗したときもこの時間で必ず切れる。 */
+        private const val WAKE_BRIDGE_TIMEOUT_MS = 30_000L
+
+        /** サービス外から起こすときの橋渡し wake lock (プロセス内で 1 本)。 */
+        private var wakeBridge: PowerManager.WakeLock? = null
+
+        /**
+         * FCM 受信・定期チェックなど、サービス外から起こす直前に呼ぶ (issue #19)。
+         * PUSH 待機中のサービスはロックを持っていないため、呼び出し元の wake lock
+         * (FCM / アラームのブロードキャスト) が切れてから `onStartCommand` →
+         * [updatePowerLocks] でロックを取るまでの間に CPU が眠り、接続開始が遅れる
+         * (着信を取りこぼす) のを防ぐ。サービスがロックを取った時点で放す
+         * ([releaseWakeBridge])。取れなくても致命的ではないので失敗は握りつぶす。
+         */
+        fun holdWakeBridge(ctx: Context) {
+            runCatching {
+                synchronized(this) {
+                    val wl = wakeBridge ?: (ctx.applicationContext
+                        .getSystemService(Context.POWER_SERVICE) as PowerManager)
+                        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SipBridge:wakeBridge")
+                        .apply { setReferenceCounted(false) }
+                        .also { wakeBridge = it }
+                    wl.acquire(WAKE_BRIDGE_TIMEOUT_MS)
+                }
+            }.onFailure { Log.w(TAG, "wake bridge acquire failed", it) }
+        }
+
+        private fun releaseWakeBridge() {
+            synchronized(this) {
+                val wl = wakeBridge ?: return
+                if (wl.isHeld) {
+                    runCatching { wl.release() }
+                    Log.i(TAG, "wake bridge released (service holds its own locks)")
+                }
+            }
+        }
 
         // gms flavor の BridgeMessagingService / GmsApplication が保存する FCM トークン。
         // (foss では該当 prefs が存在しないため常に null で無害)
@@ -96,7 +145,10 @@ class BridgeService : Service(), RelayClient.Listener {
 
         /** §6.3 手順 1 用の起動 ([ACT_REREGISTER_PUSH] を付けて起こす)。 */
         fun startReregister(ctx: Context) {
+            // アラームのブロードキャストを抜けてから接続を始めるまで眠らないように。
+            holdWakeBridge(ctx)
             val i = Intent(ctx, BridgeService::class.java).setAction(ACT_REREGISTER_PUSH)
+                .putExtra(EXTRA_WAKE_BRIDGE, true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
             else ctx.startService(i)
         }
@@ -105,12 +157,29 @@ class BridgeService : Service(), RelayClient.Listener {
     private var client: RelayClient? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    /** relay への接続を要求しているか (issue #19)。ensureConnected / connectFresh で立て、
+     *  PUSH idle 切断 ([schedulePushDisconnect] の Runnable) で下ろす。 */
+    @Volatile private var connectionWanted = false
+    /** [wakeLock] / [wifiLock] を保持中か ([powerLockGuard] で保護)。 */
+    private var powerLocksHeld = false
+    private val powerLockGuard = Any()
+    /** 直前に見た通話状態 (IDLE との出入りだけで [updatePowerLocks] を呼ぶため)。 */
+    @Volatile private var lastCallIdle = true
+    /** 通話状態が IDLE を離れた/戻ったときにロックを再評価する。 */
+    private val callStateListener = object : CallHub.StateListener {
+        override fun onChanged() {
+            val idle = CallHub.state == CallHub.State.IDLE
+            if (idle == lastCallIdle) return
+            lastCallIdle = idle
+            updatePowerLocks(if (idle) "call idle" else "call active")
+        }
+    }
     private var overlay: CallOverlayManager? = null
     private var audioManager: AudioManager? = null
     /** 全画面着信UIが前面にある間は通知・バブルを出さない (二重表示防止) */
     @Volatile private var uiVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var pushDisconnectRunnable: Runnable? = null
+    @Volatile private var pushDisconnectRunnable: Runnable? = null
     /** 未接続状態で発信要求されたとき、hello 受信後に送る発信先。 */
     @Volatile private var pendingDial: String? = null
     /** T5 が渡す FCM トークン。接続確立後の hello で register_push する。 */
@@ -178,29 +247,83 @@ class BridgeService : Service(), RelayClient.Listener {
         if (!startForegroundTyped(withMic = true)) startForegroundTyped(withMic = false)
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         overlay = CallOverlayManager(this)
+        // ロックはここでは作るだけ。取る/放すは updatePowerLocks が決める (issue #19)。
         val wm = getSystemService(Context.WIFI_SERVICE) as WifiManager
         wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SipBridge:lock").apply {
-            runCatching { acquire() }
+            // 取得/解放を isHeld で管理するため、参照カウントは使わない (二重 acquire/release 対策)。
+            setReferenceCounted(false)
         }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SipBridge:lock").apply {
             // 参照カウントを切り、再取得がタイムアウトの延長として働くようにする。
             setReferenceCounted(false)
         }
-        mainHandler.post(wakeLockRenew)
+        lastCallIdle = CallHub.state == CallHub.State.IDLE
+        CallHub.addListener(callStateListener)
         registerNetworkCallback()
         ensureClient()
+        updatePowerLocks("onCreate")
     }
 
-    /** wake lock を取り直し続ける。失効したまま端末が眠り、着信に出られなくなるのを防ぐ。 */
+    /**
+     * wake lock / Wi-Fi ロックを取る/放す (issue #19)。判定は [PowerLockPolicy.shouldHold] に
+     * 1 か所でまとめ、ここは冪等に反映するだけ (保持中に保持、解放中に解放は何もしない)。
+     * - PERSISTENT: 常に保持 (従来どおり。wake lock は [wakeLockRenew] で取り直し続ける)。
+     * - PUSH: 接続要求中 ([connectionWanted]) と通話中だけ保持し、待機中は放す。
+     * どのスレッドから呼んでもよい (OkHttp スレッド・main スレッド)。
+     */
+    private fun updatePowerLocks(reason: String) {
+        val mode: BridgeMode
+        val callIdle: Boolean
+        val wanted: Boolean
+        val hold: Boolean
+        // 判定の読み出しもロック内で行う。外で読むと、OkHttp スレッドが hold=true を
+        // 計算した直後に main が onDestroy / idle 切断で解放し、その後に取り直して
+        // wakeLockRenew が生き残る競合がある (Fable レビュー #2)。
+        synchronized(powerLockGuard) {
+            mode = BridgeConfig.load(this).mode
+            callIdle = CallHub.state == CallHub.State.IDLE
+            wanted = connectionWanted
+            hold = running && PowerLockPolicy.shouldHold(mode, callIdle, wanted)
+            if (hold == powerLocksHeld) {
+                // 既に保持中でも、橋渡し wake lock が残っていれば放す (FCM 起床の 2 回目以降など)。
+                if (hold) releaseWakeBridge()
+                return
+            }
+            powerLocksHeld = hold
+            if (hold) {
+                // 接続開始より前に同期で取る (post だと取る前に接続処理へ進むため)。
+                runCatching { wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS) }
+                    .onFailure { Log.w(TAG, "wake lock acquire failed", it) }
+                wifiLock?.let { wl -> if (!wl.isHeld) runCatching { wl.acquire() } }
+                mainHandler.removeCallbacks(wakeLockRenew)
+                mainHandler.postDelayed(wakeLockRenew, WAKE_LOCK_RENEW_MS)
+            } else {
+                mainHandler.removeCallbacks(wakeLockRenew)
+                wakeLock?.let { wl -> if (wl.isHeld) runCatching { wl.release() } }
+                wifiLock?.let { wl -> if (wl.isHeld) runCatching { wl.release() } }
+            }
+        }
+        Log.i(
+            TAG,
+            "power locks ${if (hold) "acquired" else "released"} ($reason: mode=$mode " +
+                "callIdle=$callIdle connectionWanted=$wanted)"
+        )
+        if (hold) releaseWakeBridge()
+    }
+
+    /** 保持中だけ wake lock を取り直し続ける。失効したまま端末が眠り、着信に出られなくなるのを防ぐ。 */
     private val wakeLockRenew = object : Runnable {
         override fun run() {
-            val wl = wakeLock
-            if (wl != null) {
-                runCatching { wl.acquire(WAKE_LOCK_TIMEOUT_MS) }
-                    .onFailure { Log.w(TAG, "wake lock acquire failed", it) }
+            synchronized(powerLockGuard) {
+                if (!powerLocksHeld || !running) return
+                val wl = wakeLock
+                if (wl != null) {
+                    runCatching { wl.acquire(WAKE_LOCK_TIMEOUT_MS) }
+                        .onFailure { Log.w(TAG, "wake lock acquire failed", it) }
+                }
+                mainHandler.postDelayed(this, WAKE_LOCK_RENEW_MS)
             }
-            mainHandler.postDelayed(this, WAKE_LOCK_RENEW_MS)
         }
     }
 
@@ -307,6 +430,7 @@ class BridgeService : Service(), RelayClient.Listener {
                 Log.w(TAG, "FCM トークン未取得 (register_push は取得後に送る)")
             }
         }
+        updatePowerLocks("ensureClient")
     }
 
     /** PUSH モードのオンデマンド接続 (発信・FCM 起床用)。 */
@@ -329,9 +453,17 @@ class BridgeService : Service(), RelayClient.Listener {
             )
         }
         cancelPushDisconnect()
+        // 接続開始より前にロックを取る (FCM 起床・発信・register_push の接続。issue #19)。
+        connectionWanted = true
+        updatePowerLocks("ensureConnected")
         if (client?.isConnected() != true) {
             CallHub.updateStatus("接続中… ${cfg.relayUrl}")
             connectFresh()
+        }
+        // PUSH の接続期限 (hello が来なくてもロックが残り続けないように)。
+        // hello・通話終了で 60 秒の idle 切断に積み直される。呼があれば発火時に何もしない。
+        if (cfg.mode == BridgeMode.PUSH && CallHub.state == CallHub.State.IDLE) {
+            schedulePushDisconnect(PUSH_CONNECT_DEADLINE_MS)
         }
         return true
     }
@@ -347,10 +479,23 @@ class BridgeService : Service(), RelayClient.Listener {
             sipAccountSent = false
             helloProcessed = false
         }
+        connectionWanted = true
+        updatePowerLocks("connectFresh")
         client?.connect()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        try {
+            return handleCommand(intent)
+        } finally {
+            // 橋渡し wake lock は、それを取って起こした Intent の処理が終わったら放す。
+            // 取るべきロックは handleCommand 内で同期に取り終えている (updatePowerLocks)。
+            // relayUrl 空・PERSISTENT の再登録要求など、ロックを取らない経路でも 30 秒待たない。
+            if (intent?.getBooleanExtra(EXTRA_WAKE_BRIDGE, false) == true) releaseWakeBridge()
+        }
+    }
+
+    private fun handleCommand(intent: Intent?): Int {
         when (intent?.action) {
             ACT_ANSWER -> answerFromAnywhere()
             ACT_REJECT -> rejectFromAnywhere()
@@ -414,6 +559,7 @@ class BridgeService : Service(), RelayClient.Listener {
 
     override fun onDestroy() {
         running = false
+        CallHub.removeListener(callStateListener)
         mainHandler.removeCallbacksAndMessages(null)
         runCatching { CallHub.rtp?.stop() }
         CallHub.rtp = null
@@ -421,8 +567,9 @@ class BridgeService : Service(), RelayClient.Listener {
         client?.shutdown()
         client = null
         overlay?.hide()
-        runCatching { wifiLock?.release() }
-        runCatching { wakeLock?.release() }
+        connectionWanted = false
+        // running == false のため必ず解放側に倒れる (renew の Runnable も止まる)。
+        updatePowerLocks("onDestroy")
         TelecomCallRegistry.clear()
         resetCallState()
         super.onDestroy()
@@ -533,12 +680,10 @@ class BridgeService : Service(), RelayClient.Listener {
         // §6.2 到達性の記録: hello 到達 = relay 到達。
         PushHealth.markRelayOk(this)
         // 保留トークン (T5) があれば登録する
-        var tokenRegistered = false
         pendingPushToken?.let { token ->
             pendingPushToken = null
             client?.registerPush("fcm", token)
             registeredPushToken = token
-            tokenRegistered = true
             // §6.2: register_push を送って hello まで到達した = 登録完了。
             PushHealth.markPushRegistered(this)
         }
@@ -550,7 +695,10 @@ class BridgeService : Service(), RelayClient.Listener {
                 return
             }
             if (CallHub.state == CallHub.State.IDLE) {
-                if (tokenRegistered) schedulePushDisconnect()  // 登録済みなら PUSH は切断猶予へ
+                // PUSH は切断猶予へ (PERSISTENT では何もしない)。以前は register_push を
+                // 送ったときだけだったため、FCM 起床したが呼が既に終わっていた (hello.call 無し)
+                // ときに接続とロックが残り続けた (issue #19)。
+                schedulePushDisconnect()
                 val cfg = BridgeConfig.load(this)
                 val note = when {
                     // hello.account が空で設定も空 → SIP アカウント未設定
@@ -763,6 +911,23 @@ class BridgeService : Service(), RelayClient.Listener {
         } else {
             CallHub.updateStatus(note)
         }
+        if (code == "auth") mainHandler.post { stopPushOnAuthError() }
+    }
+
+    /**
+     * PUSH モードで relay の認証に失敗 (401/403) したら、再接続を続けずに切断して
+     * ロックを放す (issue #19)。設定を直すまで成功しないため、次の起床 (push・発信) で
+     * 改めて試す。通話中は触らない (resume の再接続を妨げない)。main スレッドで呼ぶ。
+     */
+    private fun stopPushOnAuthError() {
+        if (BridgeConfig.load(this).mode != BridgeMode.PUSH) return
+        if (CallHub.state != CallHub.State.IDLE) return
+        Log.i(TAG, "PUSH auth error, disconnect")
+        cancelPushDisconnect()
+        client?.disconnect()
+        connectionWanted = false
+        updatePowerLocks("push auth error")
+        updateServiceNote()
     }
 
     override fun onDisconnected() {
@@ -781,6 +946,8 @@ class BridgeService : Service(), RelayClient.Listener {
     // ---- 着信提示 (EchoSIP 流用: 全画面優先・2.5 秒後フォールバック) ----
 
     private fun presentIncoming(callId: String, from: String, display: String, pt: Int) {
+        // idle 切断 (main) と着信提示 (OkHttp) の競合の窓を減らす。終了時に積み直される。
+        cancelPushDisconnect()
         CallHub.callId = callId
         CallHub.from = from
         // P3: 表示名解決 (relay の display → 連絡先 → 番号)。CallActivity と通知に名前が出る。
@@ -1393,21 +1560,23 @@ class BridgeService : Service(), RelayClient.Listener {
         outgoingWatchdog = null
     }
 
-    private fun schedulePushDisconnect() {
+    private fun schedulePushDisconnect(delayMs: Long = PUSH_IDLE_DISCONNECT_MS) {
         if (BridgeConfig.load(this).mode != BridgeMode.PUSH) return
         if (CallHub.state != CallHub.State.IDLE) return
         cancelPushDisconnect()
         val r = Runnable {
             pushDisconnectRunnable = null
             if (BridgeConfig.load(this).mode == BridgeMode.PUSH && CallHub.state == CallHub.State.IDLE) {
-                Log.i(TAG, "PUSH idle timeout, disconnect")
+                Log.i(TAG, "PUSH idle timeout (${delayMs}ms), disconnect")
                 client?.disconnect()
+                connectionWanted = false
+                updatePowerLocks("push idle disconnect")
                 CallHub.updateStatus("待機中 (PUSH モード)")
                 updateServiceNote()
             }
         }
         pushDisconnectRunnable = r
-        mainHandler.postDelayed(r, PUSH_IDLE_DISCONNECT_MS)
+        mainHandler.postDelayed(r, delayMs)
     }
 
     private fun cancelPushDisconnect() {
