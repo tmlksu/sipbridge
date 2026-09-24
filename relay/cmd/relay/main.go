@@ -128,7 +128,14 @@ func run() error {
 
 	mux := buildMux(authn, hub)
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
+	// ReadTimeout/WriteTimeout は WS の長時間接続を切ってしまうため設定しない。
+	// ヘッダを送り終わらない接続とアイドル接続だけを刈る (gosec G112)。
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
