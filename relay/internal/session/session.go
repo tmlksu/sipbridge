@@ -508,7 +508,10 @@ func (c *Conn) enqueue(typ websocket.MessageType, data []byte) {
 		return
 	}
 	c.hub.log.Warn("送信キュー滞留のため切断", "device", c.deviceID)
-	_ = c.ws.Close(websocket.StatusPolicyViolation, "send queue overflow")
+	// Close は close ハンドシェイク (書き込み中の writeRaw の完了待ち + 相手の応答待ち) で
+	// 最大十数秒ブロックする。ここは配信側 (イベント/メディアポンプ) から呼ばれるので、
+	// 同期で待つと詰まった 1 台が再び全体を止める。別 goroutine で閉じる (多重呼び出しは安全)。
+	go func() { _ = c.ws.Close(websocket.StatusPolicyViolation, "send queue overflow") }()
 }
 
 // group は所属グループを返す (account 無しなら nil)。
