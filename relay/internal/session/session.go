@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -34,6 +35,9 @@ const (
 	// アプリ側の再接続バックオフと Access/Tunnel のハンドシェイクを含めて収まる値にする。
 	DefaultResumeTimeout = 30 * time.Second
 	writeTimeout         = 10 * time.Second
+	// sendQueueSize は接続ごとの送信キュー長である。RTP は 20ms 間隔なので
+	// 128 は約 2.5 秒分に当たる。これを超えて滞る接続は既に使い物にならない。
+	sendQueueSize = 128
 )
 
 // BackendFactory は account ごとの call.Backend を作る。
@@ -278,7 +282,11 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		h.log.Warn("WS accept 失敗", "err", err)
 		return
 	}
-	c := &Conn{hub: h, ws: ws, deviceID: deviceID, version: r.Header.Get("X-Client-Version")}
+	c := &Conn{
+		hub: h, ws: ws, deviceID: deviceID,
+		version: r.Header.Get("X-Client-Version"),
+		out:     make(chan outFrame, sendQueueSize),
+	}
 	h.addConn(c)
 	defer h.removeConn(c)
 
@@ -300,6 +308,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	go c.pingLoop(ctx)
+	// hello 送信後に送信ループを回す (hello より前に積まれたフレームもここで流れる)。
+	go c.writeLoop(ctx)
 	c.readLoop(ctx)
 }
 
@@ -453,6 +463,55 @@ type Conn struct {
 	grp *group
 
 	writeMu sync.Mutex
+
+	// out は送信キューである。配信側 (イベントポンプ・メディアポンプ) が
+	// 遅いクライアントの書き込みを待たないよう、実送信は writeLoop に任せる。
+	out          chan outFrame
+	mediaDropped atomic.Uint64
+}
+
+// outFrame は送信キューの 1 フレームである。
+type outFrame struct {
+	typ  websocket.MessageType
+	data []byte
+}
+
+// writeLoop は送信キューを順に流す。書き込みに失敗したら接続を畳む
+// (readLoop もエラーで抜け、通常の切断処理に合流する)。
+func (c *Conn) writeLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case f := <-c.out:
+			if err := c.writeRaw(ctx, f.typ, f.data); err != nil {
+				_ = c.ws.Close(websocket.StatusGoingAway, "write failed")
+				return
+			}
+		}
+	}
+}
+
+// enqueue は送信キューに積む。キューが満ならメディアは捨て、
+// 制御メッセージなら接続を畳む (古い状態を持ったまま繋げるより、
+// 再接続させて hello で同期させる方が安全)。
+func (c *Conn) enqueue(typ websocket.MessageType, data []byte) {
+	select {
+	case c.out <- outFrame{typ: typ, data: data}:
+		return
+	default:
+	}
+	if typ == websocket.MessageBinary {
+		if n := c.mediaDropped.Add(1); n%100 == 1 {
+			c.hub.log.Warn("送信キュー満のため RTP を破棄", "device", c.deviceID, "dropped", n)
+		}
+		return
+	}
+	c.hub.log.Warn("送信キュー滞留のため切断", "device", c.deviceID)
+	// Close は close ハンドシェイク (書き込み中の writeRaw の完了待ち + 相手の応答待ち) で
+	// 最大十数秒ブロックする。ここは配信側 (イベント/メディアポンプ) から呼ばれるので、
+	// 同期で待つと詰まった 1 台が再び全体を止める。別 goroutine で閉じる (多重呼び出しは安全)。
+	go func() { _ = c.ws.Close(websocket.StatusPolicyViolation, "send queue overflow") }()
 }
 
 // group は所属グループを返す (account 無しなら nil)。
@@ -470,7 +529,19 @@ func (c *Conn) writeRaw(ctx context.Context, typ websocket.MessageType, data []b
 	return c.ws.Write(ctx2, typ, data)
 }
 
+// sendJSON は送信キュー経由で JSON を送る (error は符号化失敗のみ)。
 func (c *Conn) sendJSON(v any) error {
+	data, err := proto.Encode(v)
+	if err != nil {
+		return err
+	}
+	c.enqueue(websocket.MessageText, data)
+	return nil
+}
+
+// sendJSONSync は writeLoop を介さずに即送する (hello のように
+// 失敗をその場で判定したいフレーム用)。
+func (c *Conn) sendJSONSync(v any) error {
 	data, err := proto.Encode(v)
 	if err != nil {
 		return err
@@ -499,7 +570,7 @@ func (c *Conn) writeHello() error {
 			}
 		}
 	}
-	return c.sendJSON(&proto.Hello{
+	return c.sendJSONSync(&proto.Hello{
 		T: proto.THello, RelayVersion: c.hub.cfg.Version,
 		Extension: account, Account: account, Registered: registered,
 		Call: ci, ServerTime: time.Now().Unix(),

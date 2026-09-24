@@ -55,6 +55,7 @@ func (g *group) startBackend(password, display string) error {
 		return err
 	}
 	mgr := call.NewManager(be)
+	mgr.Log = g.log
 	if t := g.hub.cfg.NoAnswerTimeout; t > 0 {
 		mgr.NoAnswerTimeout = t
 	}
@@ -328,10 +329,12 @@ func (g *group) conns(onlyDevice, exceptDevice string) []*Conn {
 	return out
 }
 
-// writeAll はロックを解放した状態で各接続へ書き込む。
+// writeAll はロックを解放した状態で各接続の送信キューへ積む。
+// ここで実送信まで待つと、詰まった 1 台が writeTimeout 分だけ
+// 他の端末への配信とイベントポンプを止めてしまう。
 func writeAll(targets []*Conn, typ websocket.MessageType, data []byte) {
 	for _, c := range targets {
-		_ = c.writeRaw(context.Background(), typ, data)
+		c.enqueue(typ, data)
 	}
 }
 
