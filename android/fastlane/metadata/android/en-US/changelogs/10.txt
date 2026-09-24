@@ -1,0 +1,3 @@
+* Fixed your voice not reaching the other party when answering a call that woke the app via push notification (Android 11 and later)
+* Fixed the app crashing a while after a push-woken call went unanswered
+* Fixed an outgoing call sometimes staying on "Calling…" after it failed (it now ends if there is no response within 30 seconds)
