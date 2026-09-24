@@ -126,6 +126,16 @@ internal fun dedupeByNormalizedNumber(items: List<DeviceContact>): List<DeviceCo
 }
 
 /**
+ * 表示上限で切る。戻り値は (表示分, 省略件数)。Android 非依存 (JVM テスト可)。
+ * 上限以下ならリストをそのまま返し、省略は 0。
+ */
+internal fun <T> capList(items: List<T>, max: Int): Pair<List<T>, Int> {
+    val m = max.coerceAtLeast(0)
+    if (items.size <= m) return items to 0
+    return items.subList(0, m) to (items.size - m)
+}
+
+/**
  * 名前部分一致 / 番号前方一致で絞る ([ContactStore.search] と同じ基準)。
  * query が空なら全件をそのまま返す。Android 非依存 (JVM テスト可)。
  */
