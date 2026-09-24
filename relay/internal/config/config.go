@@ -35,6 +35,9 @@ type Config struct {
 	RTPPortMax  int
 	Backend     string // "fake" | "sip"
 	LogLevel    string // "debug" | "info" | "warn" | "error"
+	// ResumeTimeoutSec は通話中に WS が切れてから BYE するまでの猶予 (秒) である。
+	// アプリ側の再接続 (バックオフ + Access/Tunnel のハンドシェイク) が収まる値にする。
+	ResumeTimeoutSec int
 	// StateFile はアカウント/端末結び付け/push トークンの永続化先である
 	// (STATE_FILE。旧名 PUSH_STATE_FILE も読む)。
 	StateFile string
@@ -77,6 +80,9 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	if c.RTPPortMax, err = atoiEnv("RTP_PORT_MAX", 20100); err != nil {
+		return Config{}, err
+	}
+	if c.ResumeTimeoutSec, err = atoiEnv("RESUME_TIMEOUT_SEC", 30); err != nil {
 		return Config{}, err
 	}
 	if err := c.Validate(); err != nil {
@@ -155,6 +161,9 @@ func (c Config) Validate() error {
 	}
 	if c.RTPPortMin <= 0 || c.RTPPortMax <= 0 || c.RTPPortMin > c.RTPPortMax {
 		return fmt.Errorf("RTP_PORT_MIN/MAX の範囲が不正 (%d-%d)", c.RTPPortMin, c.RTPPortMax)
+	}
+	if c.ResumeTimeoutSec < 1 || c.ResumeTimeoutSec > 300 {
+		return fmt.Errorf("RESUME_TIMEOUT_SEC は 1..300 の範囲 (現在 %d)", c.ResumeTimeoutSec)
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
