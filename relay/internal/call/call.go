@@ -10,7 +10,9 @@ package call
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +28,11 @@ const (
 
 // 既定の無応答タイムアウト (着信から 25 秒で 480)。
 const DefaultNoAnswerTimeout = 25 * time.Second
+
+// eventQueueSize は公開イベントのバッファ長である。
+// 1 通話で発生するイベントは数件なので、受信側が一時的に詰まっても
+// 取りこぼさないだけの余裕を持たせる。
+const eventQueueSize = 128
 
 // MediaPipe は RTP の送受パイプである。
 type MediaPipe interface {
@@ -124,6 +131,11 @@ type Manager struct {
 
 	events        chan Event
 	noAnswerTimer *time.Timer
+
+	// Log はイベント取りこぼしなどの警告出力先である (nil なら [slog.Default])。
+	Log *slog.Logger
+
+	dropped atomic.Uint64
 }
 
 // NewManager は Manager を作る。
@@ -132,7 +144,7 @@ func NewManager(be Backend) *Manager {
 		be:              be,
 		state:           StateIdle,
 		NoAnswerTimeout: DefaultNoAnswerTimeout,
-		events:          make(chan Event, 32),
+		events:          make(chan Event, eventQueueSize),
 	}
 }
 
@@ -149,13 +161,27 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
+// DroppedEvents は取りこぼした公開イベント数である (監視用)。
+func (m *Manager) DroppedEvents() uint64 { return m.dropped.Load() }
+
+func (m *Manager) logger() *slog.Logger {
+	if m.Log != nil {
+		return m.Log
+	}
+	return slog.Default()
+}
+
 func (m *Manager) emit(ev Event) {
 	select {
 	case m.events <- ev:
+		return
 	default:
-		// 受信者が詰まっていても状態機械は止めない。イベント欠落は
-		// session 側の hello 同期で補える。
 	}
+	// emit は m.mu を持ったまま呼ばれるため、受信者待ちで状態機械を止められない。
+	// 欠落自体は session 側の hello 同期で補えるが、無言で消すと
+	// 「着信が出ない」「切断が届かない」原因を追えないので必ず記録する。
+	n := m.dropped.Add(1)
+	m.logger().Warn("イベントを取りこぼした", "event", fmt.Sprintf("%T", ev), "dropped", n)
 }
 
 func (m *Manager) pump(ctx context.Context, beCh <-chan Event) {

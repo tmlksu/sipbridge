@@ -173,3 +173,16 @@ func TestAnswerUnknownCall(t *testing.T) {
 		t.Errorf("空の発信先は失敗するはず")
 	}
 }
+
+// 受信者が居ないときの取りこぼしが記録されること (#5)。
+func TestEmitRecordsDroppedEvents(t *testing.T) {
+	m, _ := newManager(t)
+	// Events() を誰も読まないので、バッファを超えた分は捨てられる。
+	for i := 0; i < call.EventQueueSize+3; i++ {
+		m.EmitForTest(call.EvRegistered{OK: true})
+	}
+	// Backend の登録イベントが先にバッファへ入る分だけ多くなり得る。
+	if got := m.DroppedEvents(); got < 3 {
+		t.Fatalf("DroppedEvents = %d, want >= 3", got)
+	}
+}
