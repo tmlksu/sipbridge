@@ -58,6 +58,10 @@ func (a *TokenAuth) Authenticate(r *http.Request) error {
 // jwksURLPath はチームドメイン配下の証明書エンドポイント。
 const jwksURLPath = "/cdn-cgi/access/certs"
 
+// staleGrace は JWKS の取得が詰まった / 失敗したときに期限切れの鍵を
+// 使い続けてよい猶予である。
+const staleGrace = 30 * time.Minute
+
 // jwk は JWKS の1鍵 (RSA のみ対応)。
 type jwk struct {
 	Kty string `json:"kty"`
@@ -100,6 +104,8 @@ type CFAccessAuth struct {
 	keys      map[string]*rsa.PublicKey // kid → 公開鍵
 	fetchedAt time.Time
 	ttl       time.Duration
+	refresh   chan struct{}                                       // 取得中なら非 nil (完了で close)
+	lastErr   error                                               // 直近の取得失敗
 	fetch     func(url string) (map[string]*rsa.PublicKey, error) // 差し替え可能 (テスト用)
 }
 
@@ -149,19 +155,67 @@ func (a *CFAccessAuth) Authenticate(r *http.Request) error {
 }
 
 // cachedKeys は JWKS を ttl の間キャッシュして返す。
+//
+// 取得 (HTTP) は mu を離してから行う。ロックを持ったまま取ると、JWKS 側が
+// 詰まっている間 (最大 10 秒) すべての認証が直列で待たされ、着信のタイミングで
+// 全端末の接続が同時に落ちる。取得は 1 本だけ走らせ、他の要求は期限切れ直後の
+// 鍵 (staleGrace 以内) で通す。鍵の入れ替えは稀で、未知の kid なら結局失敗する。
 func (a *CFAccessAuth) cachedKeys() (map[string]*rsa.PublicKey, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.keys != nil && time.Since(a.fetchedAt) < a.ttl {
+		keys := a.keys
+		a.mu.Unlock()
+		return keys, nil
+	}
+	stale := a.usableStaleLocked()
+	if ch := a.refresh; ch != nil {
+		a.mu.Unlock()
+		if stale != nil {
+			return stale, nil
+		}
+		<-ch // 鍵が 1 つも無いとき (起動直後) だけ待つ
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.keys == nil {
+			if a.lastErr != nil {
+				return nil, a.lastErr
+			}
+			return nil, fmt.Errorf("JWKS 取得失敗")
+		}
 		return a.keys, nil
 	}
-	keys, err := a.fetch(a.jwksURL)
+	ch := make(chan struct{})
+	a.refresh = ch
+	url, fetch := a.jwksURL, a.fetch
+	a.mu.Unlock()
+
+	keys, err := fetch(url)
+
+	a.mu.Lock()
+	a.refresh = nil
+	a.lastErr = err
+	if err == nil {
+		a.keys = keys
+		a.fetchedAt = time.Now()
+	}
+	a.mu.Unlock()
+	close(ch)
+
 	if err != nil {
+		if stale != nil {
+			return stale, nil
+		}
 		return nil, err
 	}
-	a.keys = keys
-	a.fetchedAt = time.Now()
 	return keys, nil
+}
+
+// usableStaleLocked は猶予内の期限切れ鍵を返す (無ければ nil)。
+func (a *CFAccessAuth) usableStaleLocked() map[string]*rsa.PublicKey {
+	if a.keys == nil || time.Since(a.fetchedAt) > a.ttl+staleGrace {
+		return nil
+	}
+	return a.keys
 }
 
 // fetchJWKS は JWKS 文書を取得して kid→公開鍵の表にする。

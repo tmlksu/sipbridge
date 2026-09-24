@@ -3,8 +3,10 @@ package sipbackend
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tmlksu/sipbridge/relay/internal/call"
 )
@@ -26,21 +28,36 @@ type rtpPipe struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 	wg        sync.WaitGroup
+
+	// log は破棄の警告先である (未設定なら slog.Default)。
+	log     *slog.Logger
+	dropped atomic.Uint64
 }
 
 var _ call.MediaPipe = (*rtpPipe)(nil)
 
 // newRTPPipe はソケットと初期宛先からパイプを作り、受信ループを開始する。
-func newRTPPipe(conn *net.UDPConn, remote *net.UDPAddr) *rtpPipe {
+func newRTPPipe(conn *net.UDPConn, remote *net.UDPAddr, log *slog.Logger) *rtpPipe {
 	p := &rtpPipe{
 		conn:   conn,
 		remote: remote,
 		ch:     make(chan []byte, recvQueueLen),
 		closed: make(chan struct{}),
+		log:    log,
 	}
 	p.wg.Add(1)
 	go p.readLoop()
 	return p
+}
+
+// DroppedPackets は受信キュー溢れで捨てたパケット数である。
+func (p *rtpPipe) DroppedPackets() uint64 { return p.dropped.Load() }
+
+func (p *rtpPipe) logger() *slog.Logger {
+	if p.log != nil {
+		return p.log
+	}
+	return slog.Default()
 }
 
 // setRemote は送信宛先を更新する (re-INVITE 追従用)。
@@ -101,10 +118,15 @@ func (p *rtpPipe) readLoop() {
 		select {
 		case p.ch <- cp:
 		default:
-			// 溢れたら古い方を捨てて入れ直す。
+			// 溢れたら古い方を捨てて入れ直す。キューが埋まるのは相手 (WS 側) の
+			// 取り出しが遅れているときで、そのまま音切れになる。無言で捨てない。
 			select {
 			case <-p.ch:
 			default:
+			}
+			// 20ms 間隔なので毎回出すと五月蝿い。50 パケット (約 1 秒) ごとに 1 回。
+			if d := p.dropped.Add(1); d%recvQueueLen == 1 {
+				p.logger().Warn("RTP 受信キュー溢れ", "dropped", d, "queue", recvQueueLen)
 			}
 			select {
 			case p.ch <- cp:

@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,5 +113,49 @@ func TestCFAccessAuthFetchFailure(t *testing.T) {
 	r := &http.Request{Header: http.Header{"Cf-Access-Jwt-Assertion": {"x"}}}
 	if err := a.Authenticate(r); err == nil {
 		t.Errorf("JWKS 取得失敗時は拒否されるはず")
+	}
+}
+
+// JWKS 取得が詰まっている間、他の検証が待たされないこと (#9)。
+func TestCFAccessAuthSlowRefreshDoesNotBlock(t *testing.T) {
+	a := NewCFAccessAuthWithURL("http://example.invalid/certs", "aud")
+	release := make(chan struct{})
+	var calls atomic.Int32
+	a.fetch = func(string) (map[string]*rsa.PublicKey, error) {
+		calls.Add(1)
+		<-release
+		return map[string]*rsa.PublicKey{}, nil
+	}
+	// 期限切れの鍵を用意する (猶予内)。
+	a.keys = map[string]*rsa.PublicKey{"kid": {}}
+	a.fetchedAt = time.Now().Add(-a.ttl - time.Second)
+
+	slow := make(chan struct{})
+	go func() {
+		defer close(slow)
+		if _, err := a.cachedKeys(); err != nil {
+			t.Errorf("取得側で失敗: %v", err)
+		}
+	}()
+	// 取得が始まるまで待つ。
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := a.cachedKeys(); err != nil {
+			t.Errorf("待ち側で失敗: %v", err)
+		}
+	}()
+	select {
+	case <-done: // 期限切れの鍵で即座に通る
+	case <-time.After(2 * time.Second):
+		t.Fatal("JWKS 取得中の検証がブロックされた")
+	}
+	close(release)
+	<-slow
+	if n := calls.Load(); n != 1 {
+		t.Errorf("fetch 呼び出し = %d (1 本だけのはず)", n)
 	}
 }
