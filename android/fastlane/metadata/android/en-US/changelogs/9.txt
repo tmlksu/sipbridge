@@ -1,0 +1,4 @@
+* Reconnects to the relay right away when the phone switches between Wi-Fi and mobile data (previously it could take up to about 30 seconds to notice, dropping any call in progress)
+* Faster reconnection when the connection drops during a call
+* Answer / decline / hang up pressed while reconnecting are now re-sent once the connection is back
+* Fixed reconnection sometimes stopping during sleep after the app had been running for a long time
