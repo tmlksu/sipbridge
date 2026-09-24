@@ -786,8 +786,8 @@ func (c *Conn) handleBinary(data []byte) {
 	if pipe == nil {
 		return
 	}
-	cp := append([]byte(nil), data...)
-	_ = pipe.Send(cp)
+	// ws.Read は毎回新しいバッファを返し、Send (WriteToUDP) は同期で参照を残さないのでコピー不要。
+	_ = pipe.Send(data)
 }
 
 func (c *Conn) handleText(data []byte) {
