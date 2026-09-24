@@ -1,13 +1,18 @@
 package io.github.tmlksu.sipbridge
 
 import android.util.Log
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.TimeUnit
+import javax.net.SocketFactory
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import okio.ByteString.Companion.toByteString
 
 /**
  * relay (`wss://<host>/v1/session`) への WebSocket クライアント。
@@ -58,11 +63,147 @@ class RelayClient(
         private const val PENDING_MAX = 8
         /** 再送待ちの有効期限。これを過ぎた操作 (応答・切断) は既に意味を失っている。 */
         private const val PENDING_TTL_MS = 10_000L
+        /**
+         * relay への TCP ソケットの送信バッファ (SO_SNDBUF) 要求値。
+         *
+         * [WebSocket.queueSize] は OkHttp 内部キューの滞留しか数えず、カーネルの TCP
+         * 送信バッファが満杯になって書き込みスレッドが詰まるまで 0 のまま。Android の
+         * Wi-Fi/LTE では送信バッファが自動調整で 256KiB〜1MiB まで育つため、網が細いと
+         * 数十秒分の音声がカーネルに溜まり、[RTP_QUEUE_DROP_BYTES] のゲートが発火しない。
+         * そこで送信バッファを小さく固定し、滞留を OkHttp のキュー側に押し戻す。
+         *
+         * 根拠: Linux は SO_SNDBUF の要求値を 2 倍して採用し (管理領域込み)、明示設定した
+         * ソケットは自動調整を止める。実効 32KiB は 1 フレーム ≒ 200B (172B の RTP +
+         * WS/TLS のヘッダ) 換算で約 1.5〜3 秒分。送信バッファは 1 RTT 内に未 ACK で置ける
+         * 量の上限でもあるが、RTT 300ms でも ≒ 100KB/s で、上り音声に要る ≒ 10KB/s
+         * (50fps × 約 200B) の 10 倍あるため通常時の送出は妨げない。
+         * 下り (relay → 端末) は受信バッファ側のため影響しない。
+         */
+        const val RELAY_SOCKET_SNDBUF_BYTES = 16 * 1024
+        /**
+         * 上り RTP を捨て始める OkHttp 送信キューの滞留バイト数 ([WebSocket.queueSize] 参照)。
+         * カーネルの送信バッファ ([RELAY_SOCKET_SNDBUF_BYTES]、実効約 1.5〜3 秒分) が
+         * 埋まった後、さらに OkHttp のキューに 8KiB (1 フレーム ≒ 178B = 172B の RTP +
+         * WS フレームヘッダ 6B、50fps で約 46 フレーム ≒ 約 1 秒分) 溜まったら捨てる。
+         * OkHttp は滞留が 16MiB を超えると積まずに WebSocket を閉じる (1001) ため、
+         * それより十分手前で捨て、同じキューを通る制御メッセージ (hangup 等) が
+         * 古い RTP の後ろに埋もれないようにする。
+         */
+        const val RTP_QUEUE_DROP_BYTES = 8 * 1024
+        /** 破棄ログの間引き間隔。relay 側 rtp.go の「50 パケットごとに 1 回」相当。 */
+        const val RTP_DROP_LOG_EVERY = 50L
+    }
+
+    /**
+     * 上り RTP のバックプレッシャー判定 + 破棄計数。`queueSize()` が [RTP_QUEUE_DROP_BYTES]
+     * 以上ならそのフレームを捨てる (遅れた音声は価値が無い)。
+     * WebSocket から切り離した純粋な判定のため JVM テストで直接検証できる。
+     * 送信側 (rtp-send スレッド) のみが [shouldDrop]/[onSent] を呼び、
+     * [reset] は接続 (ws) の切り替わりで呼ぶ想定。件数の厳密さより欠落の無さを優先する。
+     */
+    class RtpSendGate(
+        private val dropBytes: Long = RTP_QUEUE_DROP_BYTES.toLong(),
+        private val logEvery: Long = RTP_DROP_LOG_EVERY
+    ) {
+        init {
+            require(logEvery >= 1) { "logEvery は 1 以上: $logEvery" }
+        }
+
+        /** 滞留で捨てた累計。[reset] で接続ごとに捨てる。 */
+        var dropped: Long = 0L
+            private set
+        private var unreported = false
+
+        /** 滞留が閾値以上なら件数を数えて true (そのフレームを捨てる)。 */
+        fun shouldDrop(queueSize: Long): Boolean {
+            if (queueSize < dropBytes) return false
+            dropped++
+            unreported = true
+            return true
+        }
+
+        /**
+         * [shouldDrop] が true の直後に呼ぶ。間引きログの番 (1, 1+logEvery, … 件目) なら true。
+         * logEvery=1 なら毎回 true。
+         */
+        fun shouldLogDrop(): Boolean = dropped > 0 && (dropped - 1) % logEvery == 0L
+
+        /** 送信成功時に呼ぶ。未報告の破棄があれば累計を返して報告済みにする。 */
+        fun onSent(): Long {
+            if (!unreported) return 0
+            unreported = false
+            return dropped
+        }
+
+        /** 接続 (ws) ごとに呼ぶ。再接続後は滞留も解消している想定のため累計は残さない。 */
+        fun reset() {
+            dropped = 0
+            unreported = false
+        }
+    }
+
+    /**
+     * 作るソケットすべてに SO_SNDBUF = [sendBufferBytes] を設定する [SocketFactory]。
+     * OkHttp は引数無しの [createSocket] で未接続ソケットを作って自分で connect し、
+     * その上に TLS を被せる (SSLSocketFactory の layered 版) ため、TLS 下の TCP にも効く。
+     * 他のオーバーロードも同じく「未接続で作る → 設定 → connect」の順にし、
+     * 接続前に確定させる。根拠は [RELAY_SOCKET_SNDBUF_BYTES]。
+     */
+    class SendBufferSocketFactory(
+        private val sendBufferBytes: Int = RELAY_SOCKET_SNDBUF_BYTES,
+        private val delegate: SocketFactory = SocketFactory.getDefault(),
+        /** 設定後の実効値 (カーネルが採用した SO_SNDBUF) の通知先。実機確認のログ用。 */
+        private val onCreated: (Int) -> Unit = {}
+    ) : SocketFactory() {
+        override fun createSocket(): Socket =
+            delegate.createSocket().apply {
+                sendBufferSize = sendBufferBytes
+                runCatching { onCreated(sendBufferSize) }
+            }
+
+        override fun createSocket(host: String, port: Int): Socket =
+            connected(InetSocketAddress(host, port), local = null)
+
+        override fun createSocket(
+            host: String,
+            port: Int,
+            localHost: InetAddress?,
+            localPort: Int
+        ): Socket = connected(InetSocketAddress(host, port), InetSocketAddress(localHost, localPort))
+
+        override fun createSocket(host: InetAddress, port: Int): Socket =
+            connected(InetSocketAddress(host, port), local = null)
+
+        override fun createSocket(
+            address: InetAddress,
+            port: Int,
+            localAddress: InetAddress?,
+            localPort: Int
+        ): Socket = connected(InetSocketAddress(address, port), InetSocketAddress(localAddress, localPort))
+
+        /** 未接続で作って SO_SNDBUF を設定してから bind/connect する。失敗時は閉じる。 */
+        private fun connected(remote: InetSocketAddress, local: InetSocketAddress?): Socket {
+            val s = createSocket()
+            try {
+                if (local != null) s.bind(local)
+                s.connect(remote)
+                return s
+            } catch (e: Exception) {
+                runCatching { s.close() }
+                throw e
+            }
+        }
     }
 
     private class PendingMsg(val json: String, val queuedAt: Long)
 
+    // RelayClient ごとの専用クライアント (他の通信とは共有しない) のため、
+    // 送信バッファの縮小は relay への WebSocket だけに効く。
     private val http = OkHttpClient.Builder()
+        .socketFactory(SendBufferSocketFactory { actual ->
+            // 端末が SO_SNDBUF を本当に絞ったかの確認用 (接続ごとに 1 行)。
+            Log.i(TAG, "relay socket SO_SNDBUF requested=$RELAY_SOCKET_SNDBUF_BYTES actual=$actual")
+        })
         .pingInterval(20, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // 長時間接続のためリードタイムアウト無し
@@ -81,6 +222,8 @@ class RelayClient(
     private var reconnectPosted = false
     /** 送信に失敗した制御メッセージ。再接続直後に古い順で送り直す (`lock` で保護)。 */
     private val pendingControl = ArrayDeque<PendingMsg>()
+    /** 上り RTP の滞留判定。接続 (ws) ごとに [RtpSendGate.reset] する。 */
+    private val rtpGate = RtpSendGate()
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun isConnected(): Boolean = connected && ws != null
@@ -104,6 +247,7 @@ class RelayClient(
             pending = null
             connected = false
             pendingControl.clear()
+            rtpGate.reset()
             o to p
         }
         runCatching { old?.close(1000, "client disconnect") }
@@ -183,6 +327,8 @@ class RelayClient(
                 if (pending === webSocket) pending = null
                 connected = true
                 backoffSec = 1L
+                // 新しい ws はキューが空のため、前の接続の破棄累計は残さない。
+                rtpGate.reset()
             }
             Log.i(TAG, "websocket open")
             flushPendingControl()
@@ -331,9 +477,27 @@ class RelayClient(
     fun pingNow(): Boolean =
         sendText(RelayProtocol.buildPing(System.currentTimeMillis()), queueOnFailure = false)
 
-    /** RTP パケット (12B ヘッダ + ペイロード) をバイナリフレームで送る。通話中のみ。 */
+    /**
+     * RTP パケット (12B ヘッダ + ペイロード) をバイナリフレームで送る。通話中のみ。
+     * OkHttp の送信キューの滞留が [RTP_QUEUE_DROP_BYTES] 以上なら (カーネルの送信バッファ
+     * [RELAY_SOCKET_SNDBUF_BYTES] が埋まった上に約 1 秒分) そのフレームを捨てて false を返す。シーケンス番号・タイムスタンプは
+     * 呼び出し側で進め続けるため、相手からは損失に見える (再送はしない)。
+     */
     fun sendRtp(rtp: ByteArray): Boolean {
         val s = ws ?: return false
-        return runCatching { s.send(ByteString.of(*rtp)) }.getOrDefault(false)
+        if (rtpGate.shouldDrop(s.queueSize())) {
+            if (rtpGate.shouldLogDrop()) {
+                Log.w(TAG, "RTP 送信キュー滞留のため破棄 (累計 ${rtpGate.dropped} 件)")
+            }
+            return false
+        }
+        // toByteString() は of(*rtp) (spread + okio 内部で 2 回コピー) と違い 1 回だけ確保する。
+        val ok = runCatching { s.send(rtp.toByteString()) }.getOrDefault(false)
+        if (ok) {
+            // 捨てていた期間が終わったら累計を 1 行出す (間引きログの締め)。
+            val total = rtpGate.onSent()
+            if (total > 0) Log.i(TAG, "RTP 送信が回復 (滞留中に $total 件破棄)")
+        }
+        return ok
     }
 }

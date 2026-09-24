@@ -26,6 +26,25 @@ object RtpPacket {
         marker: Boolean = false
     ): ByteArray {
         val out = ByteArray(HEADER_SIZE + payload.size)
+        writeHeader(out, sequence, timestamp, ssrc, payloadType, marker)
+        payload.copyInto(out, HEADER_SIZE)
+        return out
+    }
+
+    /**
+     * [out] (12B ヘッダ + ペイロード長の配列) の先頭 12B にヘッダを書く。
+     * [build] と同じ内容。送信側が中間ペイロード配列を作らず、確保した
+     * パケットバッファへ直接エンコードするための出口。
+     */
+    fun writeHeader(
+        out: ByteArray,
+        sequence: Int,
+        timestamp: Long,
+        ssrc: Long,
+        payloadType: Int,
+        marker: Boolean = false
+    ) {
+        require(out.size >= HEADER_SIZE) { "RTP バッファが 12B 未満: ${out.size}" }
         out[0] = (VERSION shl 6).toByte()
         out[1] = ((if (marker) 0x80 else 0) or (payloadType and 0x7F)).toByte()
         out[2] = (sequence ushr 8).toByte()
@@ -38,8 +57,6 @@ object RtpPacket {
         out[9] = (ssrc ushr 16).toByte()
         out[10] = (ssrc ushr 8).toByte()
         out[11] = ssrc.toByte()
-        payload.copyInto(out, HEADER_SIZE)
-        return out
     }
 
     /** 12 バイト未満・バージョン不一致は null。 */
