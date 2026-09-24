@@ -181,8 +181,10 @@ func (g *group) detach(c *Conn) {
 	if set, ok := g.devs[c.deviceID]; ok && len(set) > 0 {
 		return // 同一デバイスの別接続が残っている
 	}
-	if g.mgr != nil && g.mgr.Current() != nil {
-		g.armResumeLocked()
+	if g.mgr != nil {
+		if cur := g.mgr.Current(); cur != nil {
+			g.armResumeLocked(cur.CallID)
+		}
 	}
 }
 
@@ -198,23 +200,34 @@ func (g *group) connCount() int {
 }
 
 // armResumeLocked は勝者全断からの猶予タイマを開始する (呼び出し側が mu 保持)。
-func (g *group) armResumeLocked() {
+// タイマは張った時点の呼 (callID) にだけ効く。猶予中にその呼が終わり
+// 次の呼が始まっても、次の呼を切らない。
+func (g *group) armResumeLocked(callID string) {
 	if g.resumeTimer != nil {
 		g.resumeTimer.Stop()
 	}
 	timeout := g.hub.cfg.ResumeTimeout
 	mgr := g.mgr
-	g.log.Info("勝者切断、猶予後に BYE", "timeout", timeout)
+	winner := g.winnerDevice
+	g.log.Info("勝者切断、猶予後に BYE", "timeout", timeout, "callId", callID)
 	g.resumeTimer = time.AfterFunc(timeout, func() {
 		g.mu.Lock()
-		if _, ok := g.devs[g.winnerDevice]; ok || g.stopped {
+		if _, ok := g.devs[winner]; ok || g.stopped {
 			g.mu.Unlock()
 			return // 再接続済み / 停止済み
 		}
 		g.mu.Unlock()
-		g.log.Info("猶予超過のため切断")
-		mgr.HangupTimeout()
+		g.log.Info("猶予超過のため切断", "callId", callID)
+		mgr.HangupTimeoutIf(callID)
 	})
+}
+
+// stopResumeLocked は猶予タイマを止める (呼び出し側が mu 保持)。
+func (g *group) stopResumeLocked() {
+	if g.resumeTimer != nil {
+		g.resumeTimer.Stop()
+		g.resumeTimer = nil
+	}
 }
 
 // cancelResumeIfWinner は勝者デバイスの再接続時に猶予タイマを止める。
@@ -265,6 +278,7 @@ func (g *group) dispatch(ctx context.Context, mgr *call.Manager, ev call.Event) 
 		g.onAnswered(mgr, e)
 	case call.EvEnded:
 		g.mu.Lock()
+		g.stopResumeLocked() // 呼が終わったら猶予タイマは不要 (次の呼を切らせない)
 		g.winnerDevice = ""
 		g.dialerDevice = ""
 		g.pumping = false

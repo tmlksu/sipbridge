@@ -28,6 +28,7 @@ curl localhost:8080/healthz   # {"status":"ok"}
 | `LOCAL_IP` | (自動) | T2 の SDP/Contact 用 |
 | `RTP_PORT_MIN/MAX` | `20000/20100` | T2 の RTP 用 |
 | `BACKEND` | `fake` | `fake`\|`sip` (sip: 実 SIP サーバ対向の本番用) |
+| `RESUME_TIMEOUT_SEC` | `30` | 通話中に WS が切れてから BYE するまでの猶予 (1..300)。アプリの再接続が収まる値にする |
 | `LOG_LEVEL` | `info` | debug\|info\|warn\|error |
 | `STATE_FILE` | `/var/lib/sipbridge/state.json` | 状態ファイル (account / 端末結び付け / push トークン, 0600)。旧名 `PUSH_STATE_FILE` も読み、旧形式は起動時に自動移行 |
 | `FCM_PROJECT_ID` | (無) | FCM 送信に使用 (Firebase プロジェクト ID)。空なら push は no-op |

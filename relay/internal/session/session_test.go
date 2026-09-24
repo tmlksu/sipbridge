@@ -336,3 +336,47 @@ func TestMissingDeviceID(t *testing.T) {
 		t.Fatalf("status = %d (400 のはず)", resp.StatusCode)
 	}
 }
+
+// TestResumeTimerDoesNotKillNextCall は、勝者切断の猶予中に呼が終わり
+// 次の着信が来ても、残った猶予タイマが次の呼を切らないことを確かめる。
+func TestResumeTimerDoesNotKillNextCall(t *testing.T) {
+	const resume = 300 * time.Millisecond
+	fx := newFixtureCfg(t, push.Noop{}, nil, session.Config{
+		DefaultAccount:  defaultTestAccount,
+		DefaultPassword: defaultTestPassword,
+		ResumeTimeout:   resume,
+	})
+	fx.waitRegistered(t, defaultTestAccount)
+
+	a := dial(t, fx.url, "dev-A")
+	b := dial(t, fx.url, "dev-B")
+	defer b.Close(websocket.StatusNormalClosure, "")
+	readJSON(t, a) // hello
+	readJSON(t, b) // hello
+
+	id1 := fx.fb(t).InjectIncoming("102", "Bob", 0)
+	readJSON(t, a) // incoming
+	readJSON(t, b) // incoming
+	writeJSON(t, a, &proto.Answer{T: proto.TAnswer, CallID: id1})
+	readJSON(t, a) // answered
+	readJSON(t, b) // ended(answered_elsewhere)
+
+	// 勝者 A が落ちる → 猶予タイマ開始。猶予内に相手が切る。
+	_ = a.CloseNow()
+	time.Sleep(resume / 3)
+	fx.fb(t).InjectRemoteHangup(id1)
+	if end, ok := readJSON(t, b).(*proto.Ended); !ok || end.CallID != id1 {
+		t.Fatalf("1 本目の ended のはず: %+v", end)
+	}
+
+	// 猶予の残り時間内に次の着信。猶予満了を過ぎても鳴り続けること。
+	id2 := fx.fb(t).InjectIncoming("103", "Carol", 0)
+	if inc, ok := readJSON(t, b).(*proto.Incoming); !ok || inc.CallID != id2 {
+		t.Fatalf("2 本目の incoming のはず: %+v", inc)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resume*2)
+	defer cancel()
+	if _, data, err := b.Read(ctx); err == nil {
+		t.Fatalf("2 本目の呼に余計なメッセージ (古い猶予タイマで切られた?): %s", data)
+	}
+}

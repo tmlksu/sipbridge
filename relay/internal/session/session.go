@@ -29,8 +29,10 @@ import (
 
 // 既定値。
 const (
-	DefaultPingInterval  = 20 * time.Second
-	DefaultResumeTimeout = 10 * time.Second
+	DefaultPingInterval = 20 * time.Second
+	// DefaultResumeTimeout は通話中の切断から BYE までの猶予である。
+	// アプリ側の再接続バックオフと Access/Tunnel のハンドシェイクを含めて収まる値にする。
+	DefaultResumeTimeout = 30 * time.Second
 	writeTimeout         = 10 * time.Second
 )
 
@@ -48,7 +50,7 @@ type Config struct {
 	DefaultPassword string
 	DefaultDisplay  string
 	PingInterval    time.Duration // WS ping 周期。0 なら既定 20 秒
-	ResumeTimeout   time.Duration // 通話中の勝者切断から BYE までの猶予。0 なら既定 10 秒
+	ResumeTimeout   time.Duration // 通話中の勝者切断から BYE までの猶予。0 なら DefaultResumeTimeout
 	NoAnswerTimeout time.Duration // 着信の無応答タイムアウト。0 なら call の既定 (25 秒)
 }
 

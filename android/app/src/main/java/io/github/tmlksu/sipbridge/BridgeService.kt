@@ -200,7 +200,8 @@ class BridgeService : Service(), RelayClient.Listener {
                 accessClientSecret = cfg.accessClientSecret,
                 devToken = cfg.devToken,
                 deviceId = cfg.deviceId,
-                listener = this
+                listener = this,
+                callActive = { CallHub.state != CallHub.State.IDLE }
             )
         }
         if (cfg.mode == BridgeMode.PERSISTENT) {
@@ -239,7 +240,8 @@ class BridgeService : Service(), RelayClient.Listener {
                 accessClientSecret = cfg.accessClientSecret,
                 devToken = cfg.devToken,
                 deviceId = cfg.deviceId,
-                listener = this
+                listener = this,
+                callActive = { CallHub.state != CallHub.State.IDLE }
             )
         }
         cancelPushDisconnect()

@@ -117,6 +117,7 @@ func run() error {
 		DefaultAccount:  cfg.SIPUser,
 		DefaultPassword: cfg.SIPPassword,
 		DefaultDisplay:  cfg.SIPDisplay,
+		ResumeTimeout:   time.Duration(cfg.ResumeTimeoutSec) * time.Second,
 	}, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -352,6 +352,17 @@ func (m *Manager) HangupTimeout() {
 	m.hangupInternal("timeout", 480)
 }
 
+// HangupTimeoutIf は現在の呼が callID のときだけ HangupTimeout する。
+// 別の呼 (猶予中に前の呼が終わり、次の着信が来た等) を巻き込まないため。
+func (m *Manager) HangupTimeoutIf(callID string) {
+	m.mu.Lock()
+	match := m.cur != nil && m.cur.CallID == callID
+	m.mu.Unlock()
+	if match {
+		m.hangupInternal("timeout", 480)
+	}
+}
+
 // Dial は発信する。callID は EvRinging/EvAnswered で追跡する。
 func (m *Manager) Dial(to string) (string, error) {
 	if to == "" {
