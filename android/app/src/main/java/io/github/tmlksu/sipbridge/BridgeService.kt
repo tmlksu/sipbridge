@@ -64,6 +64,13 @@ class BridgeService : Service(), RelayClient.Listener {
         /** PUSH モードで通話終了後に切断するまでの猶予。 */
         const val PUSH_IDLE_DISCONNECT_MS = 60_000L
 
+        /** wake lock の取得時間。無期限取得は取りこぼし時に端末を起こし続けるため有限にし、
+         *  [WAKE_LOCK_RENEW_MS] ごとに取り直す。 */
+        private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60 * 1000L
+
+        /** wake lock を取り直す間隔 ([WAKE_LOCK_TIMEOUT_MS] より十分短くする)。 */
+        private const val WAKE_LOCK_RENEW_MS = 50 * 60 * 1000L
+
         // gms flavor の BridgeMessagingService / GmsApplication が保存する FCM トークン。
         // (foss では該当 prefs が存在しないため常に null で無害)
         internal const val FCM_PREFS = "sipbridge_gms"
@@ -164,10 +171,24 @@ class BridgeService : Service(), RelayClient.Listener {
         }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SipBridge:lock").apply {
-            runCatching { acquire(12 * 60 * 60 * 1000L) }
+            // 参照カウントを切り、再取得がタイムアウトの延長として働くようにする。
+            setReferenceCounted(false)
         }
+        mainHandler.post(wakeLockRenew)
         registerNetworkCallback()
         ensureClient()
+    }
+
+    /** wake lock を取り直し続ける。失効したまま端末が眠り、着信に出られなくなるのを防ぐ。 */
+    private val wakeLockRenew = object : Runnable {
+        override fun run() {
+            val wl = wakeLock
+            if (wl != null) {
+                runCatching { wl.acquire(WAKE_LOCK_TIMEOUT_MS) }
+                    .onFailure { Log.w(TAG, "wake lock acquire failed", it) }
+            }
+            mainHandler.postDelayed(this, WAKE_LOCK_RENEW_MS)
+        }
     }
 
     /**
