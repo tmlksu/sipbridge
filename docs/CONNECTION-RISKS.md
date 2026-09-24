@@ -28,9 +28,12 @@ PR #12〜#17 で対応したもの (詳細は各 PR):
 | R21 制御メッセージ | 送信失敗を 10 秒まで保持し再接続後に再送 | #14 |
 | R22 逐次書き込み | 接続ごとの送信キュー。溢れたら RTP は捨て、制御なら接続を閉じる (非同期) | #15 |
 | R23 HTTP タイムアウト | `ReadHeaderTimeout` / `IdleTimeout` | #15 |
+| **R13 FGS / マイク** | 起動時は phoneCall|microphone を試し、拒否されたら phoneCall のみで前面化 (クラッシュしない)。通話の音声開始時にマイク付きの型へ付け直す (Telecom の通話が ACTIVE なら直接、駄目なら透明な `MicPromoteActivity` 経由)。Android 11〜13 向けに録音の無音化 (`isClientSilenced`) も検出して付け直す | 60f7ced |
+| R2 半死に WS | 同一端末の古い接続を 4001/replaced で閉じる (登録順で新旧判定)。push 前にオンライン扱いの端末へ 3 秒の生存確認 ping、応答が無ければ閉じて push | 66ebce1 |
+| R5 発信の取り残し | 最初の hello 前の dial を保留、`dial_failed`/`no_account` で発信を畳む、30 秒の発信ウォッチドッグ | 508902c |
+| R6 イベント順序 | sipbackend の emit を FIFO キュー + 送り出し goroutine 1 本に | 66ebce1 |
 
-**未対応 (次の作業)**: **R13 (実機で確認済み・最優先)**、R2 (半死に WS が push を止める)、R5 (発信の取り残し)、
-R6 (SIP イベントの順序逆転)、R7 の応答競合、R8、R9、R10、R15、R17、R19、R20。
+**未対応**: R7 の応答競合、R8、R9、R10、R15、R17、R19、R20。
 
 ### 実機確認 (2026-09-24, relay 本番 + S25 gms v1.5.3 リリース版)
 
@@ -46,8 +49,12 @@ R6 (SIP イベントの順序逆転)、R7 の応答競合、R8、R9、R10、R15�
   - **応答しなかった場合 (不在着信)**: push から約 33 秒後に `ForegroundServiceDidNotStartInTimeException` で
     **アプリがクラッシュする**。不在着信のたびに起き、Samsung の Device Care にも異常として記録される
     (`PowerAnomaly AppError`)。この記録が溜まると、アプリがスリープ対象にされる恐れがある。
-  - 修正方針: 待機中は `startForeground(id, n, FOREGROUND_SERVICE_TYPE_PHONE_CALL)` で型を明示し、
-    microphone 型は応答時 (Telecom の通話が ACTIVE になってから) に追加する。
+  - **さらに、応答した通話でも録音が OS に無音化 (silenced) され、相手に声が届いていなかった**
+    (`dumpsys audio` の recording activity が `silenced`、`appops` の RECORD_AUDIO に rejectTime)。
+    push で起こされた S25 の通話は、この修正まで上りが無音だった。
+  - 修正後 (60f7ced) の実機確認: 同じ条件で応答 → `not silenced`、RTP 双方向 0% loss。
+    応答時に `startForeground(phoneCall|microphone)` が直接通る (Telecom の通話が ACTIVE の間は許可される)。
+    不在着信 → クラッシュ無し (phoneCall 型で前面のまま)。
 - **Echo Show (.214, LineageOS cronos, debug 版 + テスト relay)**: 着信の表示と応答はできたが、
   マイクを開いた時点でベンダーの音声 HAL (`android.hardware.audio.service`) が SIGSEGV で落ち、
   上りの音声が出なかった。この端末では別アプリ (`com.tmlksu.shinshibamata`) も RECORD_AUDIO を持つ
