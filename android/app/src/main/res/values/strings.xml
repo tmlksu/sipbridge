@@ -189,6 +189,20 @@
     <string name="overlay_answer">応答</string>
     <string name="overlay_reject">拒否</string>
 
+    <!-- 通話終了・発信失敗 (R5: ended/error/ウォッチドッグの状態文言) -->
+    <string name="call_ended_elsewhere">他端末で応答</string>
+    <string name="call_ended_bye">通話終了</string>
+    <string name="call_ended_cancel">相手がキャンセル</string>
+    <string name="call_ended_reject">拒否 (%1$d)</string>
+    <string name="call_ended_timeout">無応答タイムアウト (%1$d)</string>
+    <string name="call_ended_other">終了 (%1$s %2$d)</string>
+    <string name="error_no_account">SIP アカウント未設定のため発着信できません。設定タブで内線番号を入力してください</string>
+    <string name="error_account_password_mismatch">内線のパスワードが relay の登録済み値と一致しません</string>
+    <string name="error_account_failed">SIP アカウントの登録に失敗しました: %1$s</string>
+    <string name="error_other">エラー (%1$s): %2$s</string>
+    <string name="outgoing_failed_dial">発信できませんでした: %1$s</string>
+    <string name="outgoing_failed_timeout">発信できませんでした (相手からの応答がありません)</string>
+
     <!-- 到達性とセットアップ (v1.4, UI-DESIGN §6) -->
     <string name="settings_row_perm_mic">マイク</string>
     <string name="settings_row_perm_hibernation">アプリの休止を無効化</string>
