@@ -101,6 +101,14 @@ type Backend struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// emitQueue は Manager へのイベント送出キューである。emit は積むだけで
+	// ブロックせず、emitLoop (goroutine 1 本) が FIFO 順に送る。
+	// Backend メソッドは Manager のロック中に呼ばれるため、呼び出し側で
+	// ブロックしてはならない。
+	emitMu     sync.Mutex
+	emitQueue  []call.Event
+	emitNotify chan struct{}
+
 	ua     *sipgo.UserAgent
 	client *sipgo.Client
 	server *sipgo.Server
@@ -146,10 +154,11 @@ func New(cfg Config, log *slog.Logger) (*Backend, error) {
 		log = slog.Default()
 	}
 	return &Backend{
-		cfg:     cfg,
-		log:     log,
-		calls:   make(map[string]*sipCall),
-		rtpNext: cfg.RTPPortMin,
+		cfg:        cfg,
+		log:        log,
+		calls:      make(map[string]*sipCall),
+		rtpNext:    cfg.RTPPortMin,
+		emitNotify: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -223,9 +232,11 @@ func (b *Backend) Start(ctx context.Context, ev chan<- call.Event) error {
 	b.regCallID = randHexID()
 	b.regReq = b.buildRegisterReq()
 	b.ctx, b.cancel = context.WithCancel(ctx)
+	emitEv, emitCtx := ev, b.ctx
 	b.mu.Unlock()
 
 	b.registerHandlers()
+	go b.emitLoop(emitEv, emitCtx)
 
 	go func() {
 		// ctx 終了で登録解除 (Expires: 0) を 1 回送ってから
@@ -250,29 +261,67 @@ func (b *Backend) Start(ctx context.Context, ev chan<- call.Event) error {
 	return nil
 }
 
-// emit はイベントを非同期で送る。Manager のロック中に呼ばれる
-// Backend メソッドから直接 ev <- してはならないため、必ず goroutine 経由。
+// emit はイベントをキューに積むだけである。Manager のロック中に呼ばれる
+// Backend メソッドから直接 ev <- してはならないため、ブロックしない。
+// 送り出しは emitLoop (goroutine 1 本) が FIFO 順に行う。
 func (b *Backend) emit(e call.Event) {
 	b.mu.Lock()
-	ev := b.ev
-	ctx := b.ctx
-	b.mu.Unlock()
-	if ev == nil {
+	if b.ev == nil {
+		b.mu.Unlock()
 		return
 	}
-	go func() {
+	b.mu.Unlock()
+	b.emitMu.Lock()
+	b.emitQueue = append(b.emitQueue, e)
+	b.emitMu.Unlock()
+	select {
+	case b.emitNotify <- struct{}{}:
+	default:
+	}
+}
+
+// emitLoop はキューを FIFO 順に送る唯一の goroutine である。
+// ctx 付きの送信は受信側か ctx 終了まで待ち (イベントを捨てない)、
+// ctx が nil の経路は従来どおり非ブロックで捨てるが順序は保つ。
+// ctx 終了で止まる。
+func (b *Backend) emitLoop(ev chan<- call.Event, ctx context.Context) {
+	for {
+		b.emitMu.Lock()
+		if len(b.emitQueue) == 0 {
+			b.emitMu.Unlock()
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-b.emitNotify:
+					continue
+				}
+			}
+			select {
+			case <-b.emitNotify:
+				continue
+			}
+		}
+		e := b.emitQueue[0]
+		b.emitQueue[0] = nil // 参照を離して GC 可能にする
+		b.emitQueue = b.emitQueue[1:]
+		if len(b.emitQueue) == 0 {
+			b.emitQueue = nil
+		}
+		b.emitMu.Unlock()
 		if ctx != nil {
 			select {
 			case ev <- e:
 			case <-ctx.Done():
+				return
 			}
-			return
+			continue
 		}
 		select {
 		case ev <- e:
 		default:
 		}
-	}()
+	}
 }
 
 // ---- REGISTER ----
