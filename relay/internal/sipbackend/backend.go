@@ -174,7 +174,7 @@ func (b *Backend) ServerPort() int {
 func (b *Backend) Start(ctx context.Context, ev chan<- call.Event) error {
 	localIP := b.cfg.LocalIP
 	if localIP == "" {
-		localIP = detectLocalIP(net.JoinHostPort(b.cfg.SIPHost, itoa(b.cfg.SIPPort)))
+		localIP = detectLocalIP(net.JoinHostPort(b.cfg.SIPHost, itoa(b.cfg.SIPPort)), b.log)
 		b.log.Info("LOCAL_IP を自動検出", "ip", localIP)
 	}
 	sipConn, err := net.ListenPacket("udp", "0.0.0.0:0")
@@ -800,7 +800,7 @@ func (b *Backend) Answer(callID string, pt int) (call.MediaPipe, error) {
 		b.mu.Unlock()
 		return nil, err
 	}
-	pipe := newRTPPipe(conn, sc.remote)
+	pipe := newRTPPipe(conn, sc.remote, b.log)
 	sc.conn = nil // 所有権は pipe に移る
 	sc.pipe = pipe
 	sc.port = port
@@ -1038,7 +1038,7 @@ func (b *Backend) runOutgoing(callID string, req *sip.Request) {
 	cur.pt = ans.pt
 	cur.state = "active"
 	if cur.pipe == nil {
-		cur.pipe = newRTPPipe(cur.conn, ans.addr)
+		cur.pipe = newRTPPipe(cur.conn, ans.addr, b.log)
 		cur.conn = nil
 	} else {
 		cur.pipe.setRemote(ans.addr)
@@ -1081,7 +1081,7 @@ func (b *Backend) onProvisional(callID string, res *sip.Response) {
 			if off, err := parseOffer(res.Body()); err == nil {
 				sc.remote = off.addr
 				if sc.pipe == nil {
-					sc.pipe = newRTPPipe(sc.conn, off.addr)
+					sc.pipe = newRTPPipe(sc.conn, off.addr, b.log)
 					sc.conn = nil
 				} else {
 					sc.pipe.setRemote(off.addr)
@@ -1192,8 +1192,14 @@ func (b *Backend) bindRTPPort() (*net.UDPConn, int, error) {
 }
 
 // detectLocalIP は Asterisk への経路から自 IP を推定する。
-// 失敗時はループバック以外の最初の IPv4、無ければ 127.0.0.1。
-func detectLocalIP(target string) string {
+// 失敗時はループバック・リンクローカル以外の最初の IPv4、無ければ 127.0.0.1。
+//
+// 経路以外から選んだ IP は SDP と Contact に載るため、外れると片通話や
+// 再 INVITE の不達になる。推測で進めた場合は LOCAL_IP を促す警告を出す。
+func detectLocalIP(target string, log *slog.Logger) string {
+	if log == nil {
+		log = slog.Default()
+	}
 	if conn, err := net.Dial("udp", target); err == nil {
 		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP != nil && !addr.IP.IsUnspecified() {
 			ip := addr.IP.String()
@@ -1202,6 +1208,8 @@ func detectLocalIP(target string) string {
 		}
 		_ = conn.Close()
 	}
+	log.Warn("SIP サーバへの経路から自 IP を特定できず、interface から推測する",
+		"target", target, "hint", "LOCAL_IP を明示すると確実")
 	ifs, err := net.Interfaces()
 	if err == nil {
 		for _, inf := range ifs {
@@ -1220,15 +1228,20 @@ func detectLocalIP(target string) string {
 				case *net.IPAddr:
 					ip = v.IP
 				}
-				if ip == nil || ip.IsLoopback() {
+				// リンクローカル (169.254.0.0/16) は相手から到達できない。
+				if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 					continue
 				}
 				if ip = ip.To4(); ip != nil {
+					log.Warn("interface から自 IP を推測した (docker0 等を選ぶ可能性がある)",
+						"ip", ip.String(), "interface", inf.Name)
 					return ip.String()
 				}
 			}
 		}
 	}
+	log.Error("自 IP を特定できず 127.0.0.1 を使う (SDP/Contact が不正になる)",
+		"hint", "LOCAL_IP を設定")
 	return "127.0.0.1"
 }
 
