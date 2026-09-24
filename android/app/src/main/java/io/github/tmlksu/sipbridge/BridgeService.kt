@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -20,6 +21,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.app.ServiceCompat
 
 /**
  * 常駐 ForegroundService。EchoSIP の SipService を置換する。
@@ -48,6 +50,11 @@ class BridgeService : Service(), RelayClient.Listener {
         const val ACT_REREGISTER_PUSH = "sipbridge.REREGISTER_PUSH"
         const val ACT_UI_SHOWN = "sipbridge.UI_SHOWN"
         const val ACT_UI_HIDDEN = "sipbridge.UI_HIDDEN"
+        /** 通話開始時にマイク付きの前面サービスへ切り替える ([MicPromoteActivity] から、
+         *  見えている状態で起動してもらう。R13 参照)。 */
+        const val ACT_PROMOTE_MIC = "sipbridge.PROMOTE_MIC"
+        /** 録音開始から無音化を確かめるまでの待ち。 */
+        private const val MIC_CHECK_DELAY_MS = 800L
         /** `SipConnectionService.onCreateOutgoingConnection` からの発信継続
          *  (`CallActivity` は起動しない — OS 標準画面が出ているため)。 */
         const val ACT_DIAL_TELECOM = "sipbridge.DIAL_TELECOM"
@@ -154,15 +161,11 @@ class BridgeService : Service(), RelayClient.Listener {
         HealthCheckReceiver.schedule(this)
         // API 31+: バックグラウンドからの bind (FCM onNewToken 経由など) では
         // ForegroundServiceStartNotAllowedException になり得るため保護する。
-        runCatching {
-            val cfg0 = BridgeConfig.load(this)
-            startForeground(
-                NotificationHelper.ID_SERVICE,
-                NotificationHelper.serviceNotification(
-                    this, cfg0.mode == BridgeMode.PUSH, "", cfg0.serviceNotificationQuiet
-                )
-            )
-        }.onFailure { Log.w(TAG, "startForeground failed (background start?)", it) }
+        // R13: バックグラウンド (FCM・起動時など) から起こされると microphone 型は拒否される
+        // (API 34+ は SecurityException)。startForeground が一度も成功しないと
+        // ForegroundServiceDidNotStartInTimeException でクラッシュするため、
+        // マイク無し (phoneCall 型のみ) に落として必ず前面化する。マイクは通話開始時に付け直す。
+        if (!startForegroundTyped(withMic = true)) startForegroundTyped(withMic = false)
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         overlay = CallOverlayManager(this)
         val wm = getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -352,6 +355,10 @@ class BridgeService : Service(), RelayClient.Listener {
             }
             ACT_UI_SHOWN -> onCallUiShown()
             ACT_UI_HIDDEN -> onCallUiHidden()
+            ACT_PROMOTE_MIC -> {
+                val ok = startForegroundTyped(withMic = true)
+                Log.i(TAG, "マイク付き前面サービスへの切替 (見えている画面から): ok=$ok")
+            }
             ACT_DIAL_TELECOM -> {
                 val to = intent.getStringExtra(EXTRA_TO).orEmpty()
                 // 進行中の呼があるときはティアを上書きしない。遅れて届いた
@@ -406,6 +413,61 @@ class BridgeService : Service(), RelayClient.Listener {
         TelecomCallRegistry.clear()
         resetCallState()
         super.onDestroy()
+    }
+
+    /** 前面サービスがマイクを使える型 (microphone) で動いているか。 */
+    @Volatile private var micForeground = false
+
+    /**
+     * 型を明示して前面化する。成功したら true。[withMic] なら phoneCall|microphone、
+     * そうでなければ phoneCall のみ (API 29 は型の指定だけ、microphone 型は API 30 から)。
+     */
+    private fun startForegroundTyped(withMic: Boolean): Boolean {
+        val cfg = BridgeConfig.load(this)
+        val pushIdle = cfg.mode == BridgeMode.PUSH &&
+            client?.isConnected() != true && CallHub.state == CallHub.State.IDLE
+        val n = NotificationHelper.serviceNotification(
+            this, pushIdle, CallHub.extension, cfg.serviceNotificationQuiet
+        )
+        var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        if (withMic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        return runCatching {
+            ServiceCompat.startForeground(this, NotificationHelper.ID_SERVICE, n, type)
+            if (withMic) micForeground = true
+            true
+        }.getOrElse {
+            Log.w(TAG, "startForeground(withMic=$withMic) failed: ${it.javaClass.simpleName}: ${it.message}")
+            false
+        }
+    }
+
+    /**
+     * 通話の音声を始める前に、マイクを使える前面サービスにする (R13)。
+     * バックグラウンドから起こされたサービスは microphone 型を持てず、録音が無音
+     * (silenced) になる。そのまま付け直せなければ、透明な [MicPromoteActivity] を一瞬出し、
+     * 見えている状態からサービスを起動し直してもらう (その起動にはマイクの許可が付く)。
+     */
+    private fun ensureMicForeground() {
+        if (micForeground) return
+        if (startForegroundTyped(withMic = true)) {
+            Log.i(TAG, "マイク付き前面サービスへの切替: ok (直接)")
+            return
+        }
+        launchMicPromote()
+    }
+
+    private fun launchMicPromote() {
+        runCatching {
+            startActivity(
+                Intent(this, MicPromoteActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or
+                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                )
+            )
+            Log.i(TAG, "マイク付き前面サービスへの切替: MicPromoteActivity 経由")
+        }.onFailure { Log.w(TAG, "MicPromoteActivity を起動できない", it) }
     }
 
     /** 常駐通知を現在の状態に合わせて更新する (文言は UI-DESIGN §2.1)。 */
@@ -902,6 +964,7 @@ class BridgeService : Service(), RelayClient.Listener {
 
     private fun startCallMedia(pt: Int) {
         stopCallMedia()
+        ensureMicForeground()
         val engine = RtpEngine(
             payloadType = if (pt == 8) 8 else 0,
             micGain = CallHub.micGain
@@ -909,6 +972,23 @@ class BridgeService : Service(), RelayClient.Listener {
         engine.sink = RtpEngine.MediaSink { rtp -> client?.sendRtp(rtp) }
         CallHub.rtp = engine
         runCatching { engine.start() }
+        // Android 11〜13 はバックグラウンド起動でも microphone 型の前面化が例外にならず、
+        // マイクが使えないことを検出できない。録音が始まった後に「無音化 (silenced)」されて
+        // いないかを見て、されていれば見えている画面経由で付け直す。
+        mainHandler.postDelayed({ recoverSilencedMic(engine) }, MIC_CHECK_DELAY_MS)
+    }
+
+    /** 自分の録音が OS に無音化されていれば [MicPromoteActivity] で付け直す (R13)。 */
+    private fun recoverSilencedMic(engine: RtpEngine) {
+        if (CallHub.rtp !== engine) return
+        val am = audioManager ?: return
+        val silenced = runCatching {
+            am.activeRecordingConfigurations.any { it.isClientSilenced }
+        }.getOrDefault(false)
+        if (!silenced) return
+        Log.w(TAG, "録音が無音化されている。マイク付き前面サービスへ付け直す")
+        micForeground = false
+        launchMicPromote()
     }
 
     private fun stopCallMedia() {
