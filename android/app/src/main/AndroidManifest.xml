@@ -63,6 +63,15 @@
             </intent-filter>
         </activity>
 
+        <!-- R13: 通話開始時にマイク付きの前面サービスへ切り替えるための透明な画面 -->
+        <activity
+            android:name=".MicPromoteActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:showWhenLocked="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity
             android:name=".CallActivity"
             android:exported="false"
