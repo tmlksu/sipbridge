@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.ContactsContract.CommonDataKinds.Phone
 import android.text.Editable
 import android.text.InputType
@@ -34,6 +36,13 @@ import java.util.concurrent.Executors
  */
 class ContactsFragment : Fragment() {
 
+    companion object {
+        /** 検索入力のデバウンス遅延。1 文字ごとの全件 View 再構築を抑える。 */
+        internal const val SEARCH_DEBOUNCE_MS = 250L
+        /** 「端末」グループの表示上限。超えた分は描画せず末尾に 1 行だけ出す。 */
+        internal const val DEVICE_MAX_SHOWN = 100
+    }
+
     private lateinit var store: ContactStore
     private lateinit var container: LinearLayout
     private lateinit var tvEmpty: TextView
@@ -54,6 +63,10 @@ class ContactsFragment : Fragment() {
     private var pickIsAdd = true
     /** ダイアログが閉じている間に受け取ったピッカーの結果 (名前 / 番号)。 */
     private var pendingPick: Pair<String, String>? = null
+    // ---- 検索入力のデバウンス (issue #20) ----
+    /** 検索欄の入力を遅延描画するための Handler。検索以外の render は即時のまま。 */
+    private val searchHandler = Handler(Looper.getMainLooper())
+    private val searchRenderRunnable = Runnable { render() }
 
     /**
      * 端末の連絡先ピッカー (`ACTION_PICK` on `Phone.CONTENT_URI`)。
@@ -103,7 +116,7 @@ class ContactsFragment : Fragment() {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
             override fun afterTextChanged(s: Editable?) {
-                render()
+                scheduleSearchRender()
             }
         })
         view.findViewById<View>(R.id.fabAdd).setOnClickListener { showEditDialog(null) }
@@ -116,6 +129,12 @@ class ContactsFragment : Fragment() {
         // 端末側の変更も拾うためキャッシュを捨てて読み直す。
         deviceLoaded = false
         if (::store.isInitialized) render()
+    }
+
+    override fun onDestroyView() {
+        // 保留中の遅延描画を取り消す (View 破棄後の描画を防ぐ)。
+        searchHandler.removeCallbacks(searchRenderRunnable)
+        super.onDestroyView()
     }
 
     override fun onDestroy() {
@@ -168,8 +187,27 @@ class ContactsFragment : Fragment() {
         }
         if (deviceShown.isNotEmpty()) {
             container.addView(makeGroupLabel(getString(R.string.group_device)))
-            container.addView(makeDeviceCard(deviceShown))
+            // 端末は数千件になりうるため上限までだけ描画し、残りは 1 行で件数を出す。
+            val (deviceVisible, deviceOmitted) = capList(deviceShown, DEVICE_MAX_SHOWN)
+            container.addView(makeDeviceCard(deviceVisible))
+            if (deviceOmitted > 0) {
+                container.addView(makeMoreLabel(getString(R.string.contacts_device_more, deviceOmitted)))
+            }
         }
+    }
+
+    /**
+     * 検索入力からの描画はデバウンスする (約 250ms)。
+     * 連続入力中は最後の 1 回だけ描画し、1 文字ごとの全件 View 再構築を避ける。
+     * 端末の連絡先を出さないとき (既定) はローカル分だけで軽いので、従来どおり即時に描く。
+     */
+    private fun scheduleSearchRender() {
+        searchHandler.removeCallbacks(searchRenderRunnable)
+        val ctx = context ?: return
+        val showDevice = BridgeConfig.load(ctx).deviceContactsEnabled &&
+            DeviceContacts.hasPermission(ctx)
+        if (showDevice) searchHandler.postDelayed(searchRenderRunnable, SEARCH_DEBOUNCE_MS)
+        else render()
     }
 
     /** 端末の連絡先をワーカースレッドで読み、メインスレッドで描画する。 */
@@ -186,6 +224,21 @@ class ContactsFragment : Fragment() {
                 deviceLoaded = true
                 render()
             }
+        }
+    }
+
+    /** 上限で省略した分の案内行 (端末グループのカード末尾に 1 行だけ出す)。 */
+    private fun makeMoreLabel(text: String): TextView {
+        val ctx = requireContext()
+        val density = resources.displayMetrics.density
+        return TextView(ctx).apply {
+            this.text = text
+            setTextColor(ContextCompat.getColor(ctx, R.color.nocturne_text_dim))
+            textSize = 13f
+            setPadding(
+                (4 * density).toInt(), (4 * density).toInt(),
+                (4 * density).toInt(), (4 * density).toInt()
+            )
         }
     }
 
