@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * RTP 音声エンジン (G.711 PCMU/PCMA, 8kHz mono, ptime 20ms)。
  * EchoSIP の UDP 送受信部を撤去し、WebSocket バイナリ送受に差し替えたもの。
  *
- * - 送信: マイク → G.711 → [RtpPacket.build] → [MediaSink.send] (RelayClient.sendRtp)。
+ * - 送信: マイク → G.711 → [RtpPacket.writeHeader] → [MediaSink.send] (RelayClient.sendRtp)。
  * - 受信: [onRtpReceived] (RelayClient のバイナリコールバック) → RTP 解析 →
  *   G.711 デコード → [JitterBuffer] (5 フレーム開始/上限 20) → AudioTrack。
  * - RTP ヘッダの生成・解析は [RtpPacket] に分離 (JVM テスト可)。
@@ -43,9 +43,12 @@ class RtpEngine(
     private var audioRecord: AudioRecord? = null
     private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
-    private var seq = (0..30000).random()
-    private var timestamp = (0..100000).random()
-    private val ssrc = (0..Int.MAX_VALUE).random()
+    // 読み出しは JVM テスト (ヘッダの絶対値検証) 用に internal。
+    internal var seq = (0..30000).random()
+        private set
+    internal var timestamp = (0..100000).random()
+        private set
+    internal val ssrc = (0..Int.MAX_VALUE).random()
 
     private val jitter = JitterBuffer(warmupFrames = 5, maxFrames = 20)
     private val playQueue = LinkedBlockingQueue<ShortArray>()
@@ -207,23 +210,38 @@ class RtpEngine(
         }
     }
 
-    /** PCM フレームを G.711 エンコードして RTP で送る。 */
-    private fun sendPcmFrame(pcm: ShortArray, count: Int, encodeMuted: Boolean) {
+    /**
+     * PCM フレームを G.711 エンコードして RTP パケット化する。
+     * RTP パケット (12B ヘッダ + payload) の配列を直接確保してそこへ書き込むため、
+     * 中間のペイロード配列を作らない。JVM テスト用に internal。
+     */
+    internal fun buildRtpPacket(pcm: ShortArray, count: Int, encodeMuted: Boolean): ByteArray {
         val gain = micGain
-        val pay = ByteArray(count)
+        val pkt = ByteArray(RtpPacket.HEADER_SIZE + count)
         val isPcmu = payloadType != 8
         for (i in 0 until count) {
             var s = (pcm[i] * gain).toInt().coerceIn(-32768, 32767)
             if (encodeMuted && muted) s = 0
-            pay[i] = if (isPcmu) G711.linearToUlaw(s) else G711.linearToAlaw(s)
+            pkt[RtpPacket.HEADER_SIZE + i] = if (isPcmu) G711.linearToUlaw(s) else G711.linearToAlaw(s)
         }
-        val pkt = RtpPacket.build(
+        RtpPacket.writeHeader(
+            pkt,
             sequence = seq,
             timestamp = timestamp.toLong(),
             ssrc = ssrc.toLong(),
-            payloadType = payloadType,
-            payload = pay
+            payloadType = payloadType
         )
+        return pkt
+    }
+
+    /**
+     * PCM フレームを G.711 エンコードして RTP で送る。
+     * 滞留時の破棄判断は送信先 ([MediaSink] = RelayClient.sendRtp) 側に置くため、
+     * ここでは戻り値を捨てる。シーケンス番号・タイムスタンプは破棄時も進める
+     * (相手からは損失に見える。再送はしない)。
+     */
+    private fun sendPcmFrame(pcm: ShortArray, count: Int, encodeMuted: Boolean) {
+        val pkt = buildRtpPacket(pcm, count, encodeMuted)
         runCatching { sink?.send(pkt) }
         seq = (seq + 1) and 0xFFFF
         timestamp += count

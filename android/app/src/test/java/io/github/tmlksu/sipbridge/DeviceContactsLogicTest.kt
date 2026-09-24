@@ -38,6 +38,37 @@ class DeviceContactsLogicTest {
     }
 
     @Test
+    fun `上限以下はそのまま返し省略は0`() {
+        val items = listOf(dc("田中", "090-1111-2222"), dc("佐藤", "101"))
+        val (shown, omitted) = capList(items, 100)
+        assertEquals(items, shown)
+        assertEquals(0, omitted)
+        // ちょうど上限でも省略なし
+        val (shown2, omitted2) = capList(items, 2)
+        assertEquals(items, shown2)
+        assertEquals(0, omitted2)
+    }
+
+    @Test
+    fun `上限超過は先頭だけ残し省略件数を返す`() {
+        val items = listOf(dc("田中", "090-1111-2222"), dc("佐藤", "101"), dc("鈴木", "102"))
+        val (shown, omitted) = capList(items, 2)
+        assertEquals(listOf(items[0], items[1]), shown)
+        assertEquals(1, omitted)
+    }
+
+    @Test
+    fun `空リストと上限0でも壊れない`() {
+        val (shown, omitted) = capList(emptyList<DeviceContact>(), 100)
+        assertEquals(emptyList<DeviceContact>(), shown)
+        assertEquals(0, omitted)
+        val items = listOf(dc("田中", "090-1111-2222"))
+        val (shown2, omitted2) = capList(items, 0)
+        assertEquals(emptyList<DeviceContact>(), shown2)
+        assertEquals(1, omitted2)
+    }
+
+    @Test
     fun `番号前方一致は正規化して比べる`() {
         val items = listOf(dc("田中", "090-1111-2222"), dc("佐藤", "03-1234-5678"))
         // ハイフン無しの入力でもヒットする

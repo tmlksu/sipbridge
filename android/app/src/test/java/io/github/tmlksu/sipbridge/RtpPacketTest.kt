@@ -38,6 +38,41 @@ class RtpPacketTest {
     }
 
     @Test
+    fun writeHeaderMatchesBuild() {
+        val payload = ByteArray(160) { it.toByte() }
+        val viaBuild = RtpPacket.build(
+            sequence = 4321,
+            timestamp = 987654L,
+            ssrc = 0xAABBCCDDL,
+            payloadType = 8,
+            payload = payload,
+            marker = true
+        )
+        // 送信側の直接エンコード経路: パケット配列へペイロードを書いてからヘッダを足す
+        val direct = ByteArray(RtpPacket.HEADER_SIZE + payload.size)
+        payload.copyInto(direct, RtpPacket.HEADER_SIZE)
+        RtpPacket.writeHeader(
+            direct,
+            sequence = 4321,
+            timestamp = 987654L,
+            ssrc = 0xAABBCCDDL,
+            payloadType = 8,
+            marker = true
+        )
+        assertArrayEquals(viaBuild, direct)
+    }
+
+    @Test
+    fun writeHeaderRejectsShortBuffer() {
+        try {
+            RtpPacket.writeHeader(ByteArray(11), 0, 0L, 0L, 0)
+            throw AssertionError("12B 未満で失敗すべき")
+        } catch (e: IllegalArgumentException) {
+            // 期待どおり
+        }
+    }
+
+    @Test
     fun shortPacketReturnsNull() {
         assertNull(RtpPacket.parse(ByteArray(11)))
         assertNull(RtpPacket.parse(ByteArray(0)))
