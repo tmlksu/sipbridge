@@ -22,6 +22,8 @@ import okio.ByteString
  *   バックオフを [CALL_MAX_BACKOFF_SEC] にクランプする。
  * - 網切替 (Wi-Fi ↔ モバイル) は OkHttp が検知するまで時間がかかるため、
  *   呼び出し側が [onNetworkChanged] で通知する。
+ * - 送信に失敗した制御メッセージは [PENDING_TTL_MS] 以内なら再接続後に送り直す。
+ *   RTP は再送しない (遅れた音声は価値が無い)。
  * - UDP 送受信は一切行わない (端末側 LISTEN ゼロ)。
  */
 class RelayClient(
@@ -52,7 +54,13 @@ class RelayClient(
         private const val MAX_BACKOFF_SEC = 30L
         /** 通話中の再接続バックオフ上限。relay の resume 猶予より十分短くする。 */
         private const val CALL_MAX_BACKOFF_SEC = 2L
+        /** 再送待ちに残せる制御メッセージ数。 */
+        private const val PENDING_MAX = 8
+        /** 再送待ちの有効期限。これを過ぎた操作 (応答・切断) は既に意味を失っている。 */
+        private const val PENDING_TTL_MS = 10_000L
     }
+
+    private class PendingMsg(val json: String, val queuedAt: Long)
 
     private val http = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
@@ -71,6 +79,8 @@ class RelayClient(
     private val lock = Any()
     private var backoffSec = 1L
     private var reconnectPosted = false
+    /** 送信に失敗した制御メッセージ。再接続直後に古い順で送り直す (`lock` で保護)。 */
+    private val pendingControl = ArrayDeque<PendingMsg>()
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun isConnected(): Boolean = connected && ws != null
@@ -93,6 +103,7 @@ class RelayClient(
             ws = null
             pending = null
             connected = false
+            pendingControl.clear()
             o to p
         }
         runCatching { old?.close(1000, "client disconnect") }
@@ -174,6 +185,7 @@ class RelayClient(
                 backoffSec = 1L
             }
             Log.i(TAG, "websocket open")
+            flushPendingControl()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -260,9 +272,47 @@ class RelayClient(
 
     // ---------- app -> relay 送信 ----------
 
-    private fun sendText(json: String): Boolean {
-        val s = ws ?: return false
-        return runCatching { s.send(json) }.getOrDefault(false)
+    /**
+     * 制御メッセージを送る。切断中や `send()` 拒否 (送信キュー満・クローズ済) で落とすと
+     * 応答・切断が相手に届かないままになるため、[queueOnFailure] なら再送待ちに入れる。
+     */
+    private fun sendText(json: String, queueOnFailure: Boolean = true): Boolean {
+        val s = ws
+        val ok = s != null && runCatching { s.send(json) }.getOrDefault(false)
+        if (!ok && queueOnFailure) queueControl(json)
+        return ok
+    }
+
+    private fun queueControl(json: String) {
+        val now = System.currentTimeMillis()
+        val size = synchronized(lock) {
+            if (!wantConnect) return
+            // 期限切れと同一内容 (連打された hangup など) を落としてから積む。
+            pendingControl.removeAll { now - it.queuedAt > PENDING_TTL_MS || it.json == json }
+            if (pendingControl.size >= PENDING_MAX) pendingControl.removeFirst()
+            pendingControl.addLast(PendingMsg(json, now))
+            pendingControl.size
+        }
+        // 内容には sip_account のパスワードが含まれ得るためログには出さない。
+        Log.w(TAG, "制御メッセージの送信に失敗。再送待ち $size 件")
+    }
+
+    /** 再接続直後に呼ぶ。期限内の制御メッセージを古い順で送り直す。 */
+    private fun flushPendingControl() {
+        val now = System.currentTimeMillis()
+        val msgs = synchronized(lock) {
+            val ready = pendingControl.filter { now - it.queuedAt <= PENDING_TTL_MS }
+            pendingControl.clear()
+            ready
+        }
+        if (msgs.isEmpty()) return
+        Log.i(TAG, "再接続後に制御メッセージを再送: ${msgs.size} 件")
+        for (m in msgs) {
+            if (!sendText(m.json, queueOnFailure = false)) {
+                queueControl(m.json)
+                break
+            }
+        }
     }
 
     fun answer(callId: String, pt: Int? = null): Boolean = sendText(RelayProtocol.buildAnswer(callId, pt))
@@ -277,7 +327,9 @@ class RelayClient(
     fun sendSipAccount(user: String, password: String, display: String = ""): Boolean =
         sendText(RelayProtocol.buildSipAccount(user, password, display))
 
-    fun pingNow(): Boolean = sendText(RelayProtocol.buildPing(System.currentTimeMillis()))
+    /** keep-alive。落としても次の ping で足りるので再送しない。 */
+    fun pingNow(): Boolean =
+        sendText(RelayProtocol.buildPing(System.currentTimeMillis()), queueOnFailure = false)
 
     /** RTP パケット (12B ヘッダ + ペイロード) をバイナリフレームで送る。通話中のみ。 */
     fun sendRtp(rtp: ByteArray): Boolean {
