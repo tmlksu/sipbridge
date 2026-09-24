@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
@@ -127,6 +129,10 @@ class BridgeService : Service(), RelayClient.Listener {
     @Volatile private var telecomPendingIncoming = false
     /** Telecom 生成待ちの発信先 (同上)。 */
     @Volatile private var telecomPendingTo: String? = null
+    /** 網切替検知用のコールバック (登録できなかったときは null)。 */
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    /** 現在使っているデフォルト網。別の網に切り替わったことの判定に使う。 */
+    @Volatile private var activeNetwork: Network? = null
 
     inner class LocalBinder : Binder() { fun service(): BridgeService = this@BridgeService }
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -160,7 +166,51 @@ class BridgeService : Service(), RelayClient.Listener {
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SipBridge:lock").apply {
             runCatching { acquire(12 * 60 * 60 * 1000L) }
         }
+        registerNetworkCallback()
         ensureClient()
+    }
+
+    /**
+     * 網切替 (Wi-Fi ↔ モバイル) を検知して [RelayClient] に通知する。
+     * OkHttp は旧網のソケットを ping タイムアウト (最大 20 秒弱) まで生きていると見なすため、
+     * この通知が無いと再接続がその分遅れ、通話中なら relay の resume 猶予を食いつぶす。
+     *
+     * **デフォルト網**のコールバックを使う。`registerNetworkCallback(INTERNET)` だと
+     * Wi-Fi とモバイルの両方について呼ばれ、裏でモバイルが出入りするたびに
+     * 正常な Wi-Fi 上の WS を切ってしまう (逆に Wi-Fi 喪失は「使っていない網」として無視される)。
+     */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val prev = activeNetwork
+                activeNetwork = network
+                if (prev == network) return
+                Log.i(TAG, "default network: $network (prev=$prev)")
+                // 登録直後の初回通知や網ゼロからの復帰では、既存のソケットは畳まない
+                // (未接続なら即接続する)。網から網への切替のときだけ張り直す。
+                client?.onNetworkChanged(available = true, replaceSocket = prev != null)
+            }
+
+            override fun onLost(network: Network) {
+                if (activeNetwork != network) return
+                activeNetwork = null
+                Log.i(TAG, "default network lost: $network")
+                client?.onNetworkChanged(available = false)
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(cb) }
+            .onSuccess { networkCallback = cb }
+            .onFailure { Log.w(TAG, "NetworkCallback の登録に失敗", it) }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        activeNetwork = null
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        runCatching { cm.unregisterNetworkCallback(cb) }
     }
 
     /** T5: gms flavor が prefs に保存した FCM トークンを復元する。
@@ -326,6 +376,7 @@ class BridgeService : Service(), RelayClient.Listener {
         mainHandler.removeCallbacksAndMessages(null)
         runCatching { CallHub.rtp?.stop() }
         CallHub.rtp = null
+        unregisterNetworkCallback()
         client?.shutdown()
         client = null
         overlay?.hide()
