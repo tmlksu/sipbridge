@@ -86,7 +86,7 @@ IDLE --dial----> RINGING_OUT --200--> ACTIVE
                  |--hangup(CANCEL)/4xx-6xx--> IDLE
 ```
 
-- RINGING_IN で WS 未接続の登録済みデバイスがあれば、そのデバイスへ FCM push (data: `{type:"incoming", callId, caller, display}`) を送り (接続中デバイスには送らない)、25 秒以内に接続+`answer` が無ければ `480 Temporarily Unavailable`。
+- RINGING_IN で WS 未接続の登録済みデバイスがあれば、そのデバイスへ FCM push (data: `{type:"incoming", callId, caller, display}`) を送り (接続中デバイスには送らない。ただし WS ping に 3 秒応答しない接続は切断した上で送る)、25 秒以内に接続+`answer` が無ければ `480 Temporarily Unavailable`。
 - 複数セッション接続時: `incoming` を全員に送る。最初の `answer` が勝ち、他には `ended {reason:"answered_elsewhere"}`。メディアは勝者のみ。
 - 通話中に WS が切れたら relay は既定 30 秒 (`RESUME_TIMEOUT_SEC`) 待ち、同じ `X-Device-Id` の再接続で `hello.call.state=="active"` として継続 (メディア再開)。猶予超過で BYE。
   アプリ側は通話中のみ再接続バックオフを 2 秒上限にクランプするため、この猶予内に戻れる。
