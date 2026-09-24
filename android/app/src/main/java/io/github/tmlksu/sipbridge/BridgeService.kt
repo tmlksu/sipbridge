@@ -113,6 +113,16 @@ class BridgeService : Service(), RelayClient.Listener {
     /** 接続ごとの sip_account 送信済みフラグ。最初の hello でのみ送り、2 回目以降は送らない。
      *  onDisconnected でリセットする。 */
     @Volatile private var sipAccountSent = false
+    /** 接続ごとの最初の hello 処理済みフラグ。[sipAccountSent] と同じタイミングでリセットし、
+     *  onHello (sip_account 送信の後) で立てる。立つ前の dial は [pendingDial] に積む (R5)。 */
+    @Volatile private var helloProcessed = false
+    /** 発信ウォッチドッグ (dial 後 30 秒で callId が付かなければ発信を畳む R5)。
+     *  main スレッドで発火するが、arm/cancel はどのスレッドからでも呼べる
+     *  ([outgoingWatchdogGen] で新旧を判定する)。 */
+    @Volatile private var outgoingWatchdog: Runnable? = null
+    /** 発信ウォッチドッグの世代。arm/cancel のたびに進み、古い Runnable の発火を無効化する
+     *  (OkHttp スレッドと main スレッドの競合対策)。 */
+    @Volatile private var outgoingWatchdogGen = 0
     // ---- P3 履歴・連絡先 ----
     private val historyStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { HistoryStore.fromContext(this) }
     private val contactStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ContactStore.fromContext(this) }
@@ -330,7 +340,10 @@ class BridgeService : Service(), RelayClient.Listener {
      * リセットが無いと再接続時に sip_account が送られない。
      */
     private fun connectFresh() {
-        if (client?.isConnected() != true) sipAccountSent = false
+        if (client?.isConnected() != true) {
+            sipAccountSent = false
+            helloProcessed = false
+        }
         client?.connect()
     }
 
@@ -453,6 +466,8 @@ class BridgeService : Service(), RelayClient.Listener {
                 client?.sendSipAccount(cfg.sipUser, cfg.sipPassword, cfg.sipDisplay)
             }
         }
+        // 最初の hello を処理した (sip_account 送信の後)。これ以降の dial はすぐ送ってよい。
+        helloProcessed = true
         // §6.2 到達性の記録: hello 到達 = relay 到達。
         PushHealth.markRelayOk(this)
         // 保留トークン (T5) があれば登録する
@@ -572,6 +587,8 @@ class BridgeService : Service(), RelayClient.Listener {
         // 発信応答 (v1.1)。PUSH 発信などで outgoing 中のみ有効。
         if (CallHub.outgoing && (CallHub.state == CallHub.State.IDLE || CallHub.state == CallHub.State.RINGING)) {
             CallHub.callId = v.callId
+            // relay が呼を作った (callId 確定) → 発信ウォッチドッグは不要。
+            cancelOutgoingWatchdog()
             CallHub.state = CallHub.State.RINGING
             CallHub.earlyMedia = v.early
             CallHub.session = RelayCallSession(v.callId, CallHub.from, CallHub.display, 0, canAnswer = false)
@@ -585,6 +602,8 @@ class BridgeService : Service(), RelayClient.Listener {
         if (CallHub.callId.isNotEmpty() && v.callId != CallHub.callId) return
         val wasOutgoing = CallHub.outgoing
         CallHub.callId = v.callId
+        // callId 確定 → 発信ウォッチドッグは不要。
+        cancelOutgoingWatchdog()
         CallHub.state = CallHub.State.IN_CALL
         CallHub.earlyMedia = false
         CallHub.callStartedAt = System.currentTimeMillis()
@@ -613,7 +632,26 @@ class BridgeService : Service(), RelayClient.Listener {
 
     override fun onEnded(v: RelayProtocol.Ended) {
         if (CallHub.callId.isNotEmpty() && v.callId != CallHub.callId) return
-        // ---- P3 履歴書き込み ----
+        val msg = when (v.reason) {
+            "answered_elsewhere" -> getString(R.string.call_ended_elsewhere)
+            "bye" -> getString(R.string.call_ended_bye)
+            "cancel" -> getString(R.string.call_ended_cancel)
+            "reject" -> getString(R.string.call_ended_reject, v.code)
+            "timeout" -> getString(R.string.call_ended_timeout, v.code)
+            else -> getString(R.string.call_ended_other, v.reason, v.code)
+        }
+        finishCall(v.callId, msg, TelecomCompat.disconnectCauseFor(v.reason))
+    }
+
+    /**
+     * 通話終了の後始末 (R5)。relay の `ended` 受信時と、発信失敗 (`error` 受信・
+     * 発信ウォッチドッグ) 時で共有する。履歴確定、メディア停止、音声経路復元、
+     * Telecom 切断、UI 消去、PUSH 切断猶予までを通す。
+     * OkHttp スレッド・main スレッドのどちらから呼ばれてもよい
+     * ([CallHub] のフィールドは volatile/synchronized、Handler 操作はスレッドセーフ)。
+     */
+    private fun finishCall(endedCallId: String, statusMsg: String, disconnectCause: Int) {
+        // ---- P3 履歴書き込み (従来 onEnded の処理) ----
         val activeId = activeHistoryId
         activeHistoryId = null
         if (activeId != null) {
@@ -622,52 +660,53 @@ class BridgeService : Service(), RelayClient.Listener {
                 ((System.currentTimeMillis() - CallHub.callStartedAt) / 1000).coerceAtLeast(0L)
             } else 0L
             runCatching { historyStore.updateDuration(activeId, dur) }
-            markHistoryDone(v.callId)
+            markHistoryDone(endedCallId)
         } else if (CallHub.state == CallHub.State.RINGING && !CallHub.outgoing && CallHub.session != null) {
             // 未応答の着信 (timeout / cancel / answered_elsewhere / reject) → MISSED
-            writeMissedOnce(v.callId, CallHub.from, CallHub.display, incomingStartedAt)
+            writeMissedOnce(endedCallId, CallHub.from, CallHub.display, incomingStartedAt)
         } else {
-            markHistoryDone(v.callId)
+            markHistoryDone(endedCallId)
         }
         stopCallMedia()
         restoreAudioRoute()
-        TelecomCallRegistry.setDisconnected(TelecomCompat.disconnectCauseFor(v.reason))
+        TelecomCallRegistry.setDisconnected(disconnectCause)
         TelecomCallRegistry.clear()
-        val msg = when (v.reason) {
-            "answered_elsewhere" -> "他端末で応答"
-            "bye" -> "通話終了"
-            "cancel" -> "相手がキャンセル"
-            "reject" -> "拒否 (${v.code})"
-            "timeout" -> "無応答タイムアウト (${v.code})"
-            else -> "終了 (${v.reason} ${v.code})"
-        }
         resetCallState()
         hideInCallPill()
         overlay?.hide()
         (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
             .cancel(NotificationHelper.ID_INCOMING)
-        CallHub.updateStatus(msg)
+        CallHub.updateStatus(statusMsg)
         updateServiceNote()
         schedulePushDisconnect()
     }
 
     override fun onError(code: String, message: String) {
-        // SIP アカウント系エラーは設定画面の状態に日本語で反映する。
+        // エラー理由が分かる文言を状態に出す (文言は strings.xml)。
         val note = when (code) {
-            "no_account" ->
-                "SIP アカウント未設定のため発着信できません。設定タブで内線番号を入力してください"
-            "account_password_mismatch" ->
-                "内線のパスワードが relay の登録済み値と一致しません"
-            "account_failed" ->
-                "SIP アカウントの登録に失敗しました: $message"
-            else -> "エラー ($code): $message"
+            "no_account" -> getString(R.string.error_no_account)
+            "account_password_mismatch" -> getString(R.string.error_account_password_mismatch)
+            "account_failed" -> getString(R.string.error_account_failed, message)
+            "dial_failed" -> getString(R.string.outgoing_failed_dial, message)
+            else -> getString(R.string.error_other, code, message)
         }
-        CallHub.updateStatus(note)
+        if (OutgoingCallPolicy.shouldFailOutgoingOnError(
+                code, CallHub.outgoing, CallHub.state == CallHub.State.RINGING
+            )
+        ) {
+            // 発信中に dial 失敗系エラー → ended と同じ後始末で発信表示を畳む (R5)。
+            // relay 側に呼は無い (または作られなかった) ため CANCEL 等は送らない。
+            Log.i(TAG, "outgoing failed (error $code), fold outgoing call")
+            finishCall(CallHub.callId, note, DisconnectCause.ERROR)
+        } else {
+            CallHub.updateStatus(note)
+        }
     }
 
     override fun onDisconnected() {
         // 接続ごとの sip_account 送信フラグをリセットする。
         sipAccountSent = false
+        helloProcessed = false
         CallHub.registered = false
         CallHub.updateStatus("再接続中…")
         updateServiceNote()
@@ -761,6 +800,7 @@ class BridgeService : Service(), RelayClient.Listener {
      *  ここで Telecom の呼を切る。`onEnded`/`reject`/`hangup` 済みなら connection は
      *  null のため二重実行は no-op。 */
     private fun resetCallState() {
+        cancelOutgoingWatchdog()
         TelecomCallRegistry.setDisconnected(DisconnectCause.UNKNOWN)
         TelecomCallRegistry.clear()
         cancelTelecomWatchdog()
@@ -1203,12 +1243,16 @@ class BridgeService : Service(), RelayClient.Listener {
         }.getOrNull()
         CallHub.notifyChanged()
         CallHub.updateStatus("発信中… $dest")
-        if (client?.isConnected() == true) {
-            client?.dial(dest)
-        } else {
-            // 接続確立後の hello 受信時 (onHello) に送る
+        if (OutgoingCallPolicy.shouldQueueDialForHello(client?.isConnected() == true, helloProcessed)) {
+            // 未接続、または接続直後で最初の hello がまだ (sip_account 未送信) →
+            // hello 処理後 (onHello) に送る (R5)。relay は account 未結び付けの dial に
+            // error {no_account} を返すため、hello 前には送らない。
             pendingDial = dest
+        } else {
+            client?.dial(dest)
         }
+        // dial を送った (または積んだ) 時点から 30 秒で callId が付かなければ畳む。
+        armOutgoingWatchdog(dest)
         // OS 標準画面が出ている発信 (標準ダイヤラー起点) では自前 UI は出さない。
         if (showUi) {
             startActivity(CallOverlayManager.callActivityIntent(this))
@@ -1236,6 +1280,37 @@ class BridgeService : Service(), RelayClient.Listener {
         // 登録されなかった (新規インストール直後に push が届かない不具合)。
         Log.i(TAG, "FCM トークン到着 (未接続)。register_push のため接続する")
         ensureConnected()
+    }
+
+    /**
+     * 発信ウォッチドッグ (R5)。dial を送った (または [pendingDial] に積んだ) 時点から
+     * [OutgoingCallPolicy.OUTGOING_WATCHDOG_MS] 経っても callId が空なら、relay が
+     * ringing/answered を返さないため [finishCall] で発信を終了させる。
+     * 発火は main スレッド。callId 確定・通話終了・別の発信で解除する。
+     */
+    private fun armOutgoingWatchdog(dest: String) {
+        cancelOutgoingWatchdog()
+        val gen = ++outgoingWatchdogGen
+        val r = Runnable {
+            outgoingWatchdog = null
+            if (gen != outgoingWatchdogGen) return@Runnable
+            if (OutgoingCallPolicy.shouldTimeoutOutgoing(
+                    CallHub.outgoing, CallHub.state == CallHub.State.RINGING, CallHub.callId.isNotBlank()
+                )
+            ) {
+                Log.w(TAG, "発信ウォッチドッグ: 30 秒経っても callId が付かないため終了 dest=$dest")
+                finishCall(CallHub.callId, getString(R.string.outgoing_failed_timeout), DisconnectCause.ERROR)
+            }
+        }
+        outgoingWatchdog = r
+        mainHandler.postDelayed(r, OutgoingCallPolicy.OUTGOING_WATCHDOG_MS)
+    }
+
+    /** 発信ウォッチドッグの解除 (callId 確定・通話終了・再 arm 時)。どのスレッドからでもよい。 */
+    private fun cancelOutgoingWatchdog() {
+        outgoingWatchdogGen++
+        outgoingWatchdog?.let { mainHandler.removeCallbacks(it) }
+        outgoingWatchdog = null
     }
 
     private fun schedulePushDisconnect() {
