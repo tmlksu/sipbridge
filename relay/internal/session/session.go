@@ -34,10 +34,15 @@ const (
 	// DefaultResumeTimeout は通話中の切断から BYE までの猶予である。
 	// アプリ側の再接続バックオフと Access/Tunnel のハンドシェイクを含めて収まる値にする。
 	DefaultResumeTimeout = 30 * time.Second
-	writeTimeout         = 10 * time.Second
+	// DefaultLivenessProbeTimeout は push 判定前の WS 生存確認 ping の待ち上限である。
+	DefaultLivenessProbeTimeout = 3 * time.Second
+	writeTimeout                = 10 * time.Second
 	// sendQueueSize は接続ごとの送信キュー長である。RTP は 20ms 間隔なので
 	// 128 は約 2.5 秒分に当たる。これを超えて滞る接続は既に使い物にならない。
 	sendQueueSize = 128
+	// closeReplaced は同一端末の新しい接続が古い接続を置き換えるときの
+	// 独自クローズコードである (RFC 6455 の 4000 番台)。
+	closeReplaced websocket.StatusCode = 4001
 )
 
 // BackendFactory は account ごとの call.Backend を作る。
@@ -56,6 +61,9 @@ type Config struct {
 	PingInterval    time.Duration // WS ping 周期。0 なら既定 20 秒
 	ResumeTimeout   time.Duration // 通話中の勝者切断から BYE までの猶予。0 なら DefaultResumeTimeout
 	NoAnswerTimeout time.Duration // 着信の無応答タイムアウト。0 なら call の既定 (25 秒)
+	// LivenessProbeTimeout は push 判定前の生存確認 ping の待ち上限。
+	// 0 なら DefaultLivenessProbeTimeout (3 秒)。
+	LivenessProbeTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -64,6 +72,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ResumeTimeout <= 0 {
 		c.ResumeTimeout = DefaultResumeTimeout
+	}
+	if c.LivenessProbeTimeout <= 0 {
+		c.LivenessProbeTimeout = DefaultLivenessProbeTimeout
 	}
 	return c
 }
@@ -80,6 +91,7 @@ type Hub struct {
 	ctx    context.Context               // Run で受け取った親 ctx (group の親)
 	groups map[string]*group             // account → グループ
 	conns  map[string]map[*Conn]struct{} // deviceID → 接続集合 (全 account 横断)
+	seq    uint64                        // 接続の登録順序 (同一端末の新旧判定用)。hub.mu で保護する。
 }
 
 // NewHub は Hub を作る。store が nil ならメモリのみの状態を使う。
@@ -221,6 +233,9 @@ func (h *Hub) onlineDevices() map[string]bool {
 // pushIncomingOffline は account に結び付いた WS 未接続デバイスへ FCM を送る。
 // PUSH モード端末は他端末が接続中でも着信に起床する必要があるため、
 // 「接続ゼロ時のみ」ではなく「オフライン端末ごと」に送る。
+// 半死にの WS (スリープや網喪失で死んだが ping で刈られる前の接続) を
+// 「オンライン」と誤認しないよう、トークン持ちでオンライン扱いの端末には
+// 即座に ping を打って生死を確認し、全滅なら切断して push 対象に加える。
 // 実送信はイベントポンプを塞がないよう非同期に行う。
 func (h *Hub) pushIncomingOffline(ctx context.Context, account string, e call.EvIncoming) {
 	if h.pusher == nil || account == "" {
@@ -238,31 +253,143 @@ func (h *Hub) pushIncomingOffline(ctx context.Context, account string, e call.Ev
 	}
 	online := h.onlineDevices()
 	tokens := make([]string, 0, len(devs))
+	suspects := make(map[string]string) // deviceID → push トークン (要生存確認)
 	for id, d := range devs {
-		if d.Push == nil || d.Push.Token == "" || online[id] {
+		if d.Push == nil || d.Push.Token == "" {
+			continue
+		}
+		if online[id] {
+			suspects[id] = d.Push.Token
 			continue
 		}
 		tokens = append(tokens, d.Push.Token)
 	}
-	if len(tokens) == 0 {
+	if len(tokens) == 0 && len(suspects) == 0 {
 		return
 	}
 	p := push.Payload{Type: "incoming", CallID: e.CallID, From: e.From, Display: e.Display}
 	// 送信は別 goroutine で行う。イベントポンプ上で FCM の HTTP 往復を
 	// 待つと、後続の answered/ended の配送が最大でタイムアウト分遅れる。
-	// tokens は spawn 前に確定済みなので競合しない。
+	// tokens/suspects は spawn 前に確定済みで、goroutine 内では読みだけなので競合しない。
+	// 確定オフライン分はプローブを待たず即送し (遅延させない)、要確認分は
+	// 生存確認の後に送る。どちらも合わせて 10 秒以内に収める。
 	// ctx は Hub 停止でキャンセルされるが、push は投げ切りたいので
 	// キャンセルだけ切り離す (値は引き継ぐ)。
 	sendCtx := context.WithoutCancel(ctx)
+	probeTimeout := h.cfg.LivenessProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = DefaultLivenessProbeTimeout
+	}
 	go func() {
 		ctx2, cancel := context.WithTimeout(sendCtx, 10*time.Second)
 		defer cancel()
-		if err := h.pusher.Send(ctx2, tokens, p); err != nil {
-			h.log.Warn("push 送信失敗", "err", err, "callId", e.CallID)
-		} else {
-			h.log.Info("push 送信", "devices", len(tokens), "callId", e.CallID, "account", account)
+		if len(tokens) > 0 {
+			if err := h.pusher.Send(ctx2, tokens, p); err != nil {
+				h.log.Warn("push 送信失敗", "err", err, "callId", e.CallID)
+			} else {
+				h.log.Info("push 送信", "devices", len(tokens), "callId", e.CallID, "account", account)
+			}
+		}
+		if len(suspects) > 0 {
+			dead := h.probeDeadDevices(ctx2, suspects, probeTimeout)
+			if len(dead) == 0 {
+				return
+			}
+			if err := h.pusher.Send(ctx2, dead, p); err != nil {
+				h.log.Warn("push 送信失敗 (半死に)", "err", err, "callId", e.CallID)
+			} else {
+				h.log.Info("push 送信 (半死に)", "devices", len(dead), "callId", e.CallID, "account", account)
+			}
 		}
 	}()
+}
+
+// probeDeadDevices はオンライン扱いで push トークンを持つ端末の生死を確認する。
+// 各端末の全接続に並行で ping を打ち (待ち上限 timeout)、1 本も pong が返らない
+// 端末の接続を閉じて、そのトークンを返す。生きている接続がある端末は含めない。
+// 判定中 (プローブ開始後) に増えた接続は新しい再接続とみなし、閉じずに生存扱いにする。
+func (h *Hub) probeDeadDevices(ctx context.Context, suspects map[string]string, timeout time.Duration) []string {
+	type target struct {
+		dev string
+		c   *Conn
+	}
+	h.mu.Lock()
+	var targets []target
+	probed := make(map[string]map[*Conn]struct{})
+	for dev := range suspects {
+		set, ok := h.conns[dev]
+		if !ok {
+			continue // 既に切断済み → 呼び出し側で死扱いにする
+		}
+		for c := range set {
+			targets = append(targets, target{dev: dev, c: c})
+			if probed[dev] == nil {
+				probed[dev] = make(map[*Conn]struct{})
+			}
+			probed[dev][c] = struct{}{}
+		}
+	}
+	h.mu.Unlock()
+
+	alive := make(map[string]bool)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t target) {
+			defer wg.Done()
+			pctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			if err := t.c.ws.Ping(pctx); err == nil {
+				mu.Lock()
+				alive[t.dev] = true
+				mu.Unlock()
+			}
+		}(t)
+	}
+	wg.Wait()
+
+	h.mu.Lock()
+	var dead []string
+	var toClose []*Conn
+	for dev, tok := range suspects {
+		if alive[dev] {
+			continue
+		}
+		set, ok := h.conns[dev]
+		if !ok || len(set) == 0 {
+			// プローブ中に切断済み → オフライン確定で push する。
+			dead = append(dead, tok)
+			continue
+		}
+		// プローブ開始後に増えた接続があれば新しい再接続とみなし、
+		// 閉じず・push せず (生存扱い)。
+		fresh := false
+		for c := range set {
+			if _, was := probed[dev][c]; !was {
+				fresh = true
+				break
+			}
+		}
+		if fresh {
+			continue
+		}
+		for c := range set {
+			toClose = append(toClose, c)
+		}
+		dead = append(dead, tok)
+	}
+	h.mu.Unlock()
+	for _, c := range toClose {
+		cc := c
+		// Close はハンドシェイクで止まりうるので非同期に閉じる。
+		// ここは push 用の goroutine のため、イベントポンプは塞がない。
+		go func() { _ = cc.ws.Close(websocket.StatusGoingAway, "liveness probe failed") }()
+	}
+	if len(dead) > 0 {
+		h.log.Info("半死に接続を切断して push", "devices", len(dead))
+	}
+	return dead
 }
 
 // ---- WS ハンドラ ----
@@ -305,12 +432,40 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	if g != nil {
 		g.cancelResumeIfWinner(deviceID)
 	}
+	// 同一端末の古い接続を追い出す。新しい接続を先に登録 (addConn 済み) してから
+	// 古い方を閉じる順序が重要: group.detach は同じデバイスの別接続が残って
+	// いれば resume 猶予タイマを張らないため、この順なら通話中の張り替えで
+	// 猶予タイマ・BYE が発生せず、下り/上り RTP も新接続に移る。
+	h.replaceDuplicateConns(c)
 
 	ctx := r.Context()
 	go c.pingLoop(ctx)
 	// hello 送信後に送信ループを回す (hello より前に積まれたフレームもここで流れる)。
 	go c.writeLoop(ctx)
 	c.readLoop(ctx)
+}
+
+// replaceDuplicateConns は同じ deviceID の古い接続をすべて閉じる。
+// 呼び出し時点で新しい接続は登録済み (addConn + hello 済み) であること。
+// 登録順序 (seq) より古い接続だけを閉じる: ServeWS は接続ごとに並行に進むため、
+// 古い接続側のこの処理が新しい接続の登録後に遅れて走っても、新しい方を
+// 殺さない (登録順が後の勝ち)。古い接続の detach は新接続が残っているため
+// resume タイマを張らない。Close は相手の応答待ちで止まりうるため非同期に閉じる。
+func (h *Hub) replaceDuplicateConns(newConn *Conn) {
+	h.mu.Lock()
+	set := h.conns[newConn.deviceID]
+	olds := make([]*Conn, 0, len(set))
+	for c := range set {
+		if c != newConn && c.seq < newConn.seq {
+			olds = append(olds, c)
+		}
+	}
+	h.mu.Unlock()
+	for _, c := range olds {
+		cc := c
+		h.log.Info("重複接続を置換", "device", newConn.deviceID)
+		go func() { _ = cc.ws.Close(closeReplaced, "replaced") }()
+	}
 }
 
 // addConn は接続を登録し、結び付け済み account (無ければ既定アカウント) の
@@ -332,6 +487,8 @@ func (h *Hub) addConn(c *Conn) {
 		set = make(map[*Conn]struct{})
 		h.conns[c.deviceID] = set
 	}
+	h.seq++
+	c.seq = h.seq
 	set[c] = struct{}{}
 	c.grp = g
 	if g != nil {
@@ -458,6 +615,9 @@ type Conn struct {
 	ws       *websocket.Conn
 	deviceID string
 	version  string
+	// seq は登録順序 (Hub.seq の写し)。同一端末の新旧判定に使う。
+	// addConn で hub.mu の保護下で一度だけ書き、それ以後は不変。
+	seq uint64
 
 	// grp は所属グループ。hub.mu で保護する。
 	grp *group
