@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -161,6 +162,10 @@ func (c Config) Validate() error {
 	}
 	if c.RTPPortMin <= 0 || c.RTPPortMax <= 0 || c.RTPPortMin > c.RTPPortMax {
 		return fmt.Errorf("RTP_PORT_MIN/MAX の範囲が不正 (%d-%d)", c.RTPPortMin, c.RTPPortMax)
+	}
+	// 不正な LOCAL_IP は SDP/Contact にそのまま載り、片通話になるまで気づけない。
+	if c.LocalIP != "" && net.ParseIP(c.LocalIP) == nil {
+		return fmt.Errorf("LOCAL_IP が IP アドレスではない (現在 %q)", c.LocalIP)
 	}
 	if c.ResumeTimeoutSec < 1 || c.ResumeTimeoutSec > 300 {
 		return fmt.Errorf("RESUME_TIMEOUT_SEC は 1..300 の範囲 (現在 %d)", c.ResumeTimeoutSec)

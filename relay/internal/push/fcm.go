@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -33,6 +34,10 @@ const (
 	fcmScope = "https://www.googleapis.com/auth/firebase.messaging"
 	// fcmAndroidTTL は着信 push の有効期限 (PROTOCOL.md の 25 秒応答待ちより少し長い) である。
 	fcmAndroidTTL = "30s"
+	// maxSendConcurrency は同時送信数の上限である。着信 push は 25 秒の応答待ちに
+	// 間に合わせる必要があり、逐次だと 1 台の遅延 (HTTP タイムアウト 10 秒) が
+	// 後続の端末にそのまま積み上がる。FCM 側への同時接続を増やしすぎない程度に並列化する。
+	maxSendConcurrency = 8
 )
 
 // FCMConfig は NewFCM の設定である。
@@ -159,22 +164,37 @@ func (e *InvalidTokenError) Error() string {
 //     android.priority=HIGH、ttl=30s を付ける。
 //   - UNREGISTERED と判定したトークンは削除先から消し、エラーに含めない。
 //     それ以外の失敗は errors.Join でまとめて返す。
+//   - 送信は maxSendConcurrency まで並列に行う (端末数分の遅延を積み上げないため)。
 func (f *FCM) Send(ctx context.Context, tokens []string, p Payload) error {
-	var errs []error
+	var (
+		mu   sync.Mutex
+		errs []error
+		wg   sync.WaitGroup
+	)
+	sem := make(chan struct{}, maxSendConcurrency)
 	for _, tok := range tokens {
 		if tok == "" {
 			continue
 		}
-		err := f.sendOne(ctx, tok, p)
-		var invErr *InvalidTokenError
-		if errors.As(err, &invErr) {
-			f.removeToken(tok)
-			continue
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("トークン %q への送信失敗: %w", maskToken(tok), err))
-		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(tok string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			err := f.sendOne(ctx, tok, p)
+			var invErr *InvalidTokenError
+			if errors.As(err, &invErr) {
+				f.removeToken(tok)
+				return
+			}
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("トークン %q への送信失敗: %w", maskToken(tok), err))
+				mu.Unlock()
+			}
+		}(tok)
 	}
+	wg.Wait()
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
