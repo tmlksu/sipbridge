@@ -100,6 +100,7 @@
     <string name="contacts_save_to_local">連絡先に保存</string>
     <string name="contacts_saved">連絡先に保存しました</string>
     <string name="contacts_delete_msg">「%1$s」を削除しますか？</string>
+    <string name="contacts_device_more">ほか %1$d 件。検索で絞り込んでください</string>
     <string name="contacts_name_hint">名前</string>
     <string name="contacts_number_hint">番号 (内線・外線)</string>
 
