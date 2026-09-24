@@ -103,13 +103,18 @@ class RelayClient(
      * 端末のネットワークが切り替わった/失われたときに呼ぶ。
      * 旧網に紐づいたソケットはブラックホール化して ping タイムアウトまで生きて見えるため、
      * 明示的に畳んでから再接続する。[available] が true ならバックオフをリセットして即接続する。
+     * [replaceSocket] が false なら既存のソケットや接続試行は畳まない
+     * (網が 1 つ目に見つかっただけで、網から網へ切り替わったわけではない場合)。
      */
-    fun onNetworkChanged(available: Boolean) {
+    fun onNetworkChanged(available: Boolean, replaceSocket: Boolean = true) {
         val (old, pend) = synchronized(lock) {
             if (!wantConnect) return
-            if (available) backoffSec = 1L
             val o = ws
             val p = pending
+            if (!replaceSocket && o != null) return
+            if (available) backoffSec = 1L
+            // 接続試行中なら任せる (失敗しても、戻したバックオフで即再試行される)。
+            if (!replaceSocket && p != null) return
             if (o == null && p == null) return@synchronized null to null
             ws = null
             pending = null

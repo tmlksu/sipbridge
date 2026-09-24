@@ -8,8 +8,6 @@ import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
@@ -176,6 +174,10 @@ class BridgeService : Service(), RelayClient.Listener {
      * 網切替 (Wi-Fi ↔ モバイル) を検知して [RelayClient] に通知する。
      * OkHttp は旧網のソケットを ping タイムアウト (最大 20 秒弱) まで生きていると見なすため、
      * この通知が無いと再接続がその分遅れ、通話中なら relay の resume 猶予を食いつぶす。
+     *
+     * **デフォルト網**のコールバックを使う。`registerNetworkCallback(INTERNET)` だと
+     * Wi-Fi とモバイルの両方について呼ばれ、裏でモバイルが出入りするたびに
+     * 正常な Wi-Fi 上の WS を切ってしまう (逆に Wi-Fi 喪失は「使っていない網」として無視される)。
      */
     private fun registerNetworkCallback() {
         if (networkCallback != null) return
@@ -184,23 +186,21 @@ class BridgeService : Service(), RelayClient.Listener {
             override fun onAvailable(network: Network) {
                 val prev = activeNetwork
                 activeNetwork = network
-                if (prev != network) {
-                    Log.i(TAG, "network available: $network (prev=$prev)")
-                    client?.onNetworkChanged(available = true)
-                }
+                if (prev == network) return
+                Log.i(TAG, "default network: $network (prev=$prev)")
+                // 登録直後の初回通知や網ゼロからの復帰では、既存のソケットは畳まない
+                // (未接続なら即接続する)。網から網への切替のときだけ張り直す。
+                client?.onNetworkChanged(available = true, replaceSocket = prev != null)
             }
 
             override fun onLost(network: Network) {
                 if (activeNetwork != network) return
                 activeNetwork = null
-                Log.i(TAG, "network lost: $network")
+                Log.i(TAG, "default network lost: $network")
                 client?.onNetworkChanged(available = false)
             }
         }
-        val req = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        runCatching { cm.registerNetworkCallback(req, cb) }
+        runCatching { cm.registerDefaultNetworkCallback(cb) }
             .onSuccess { networkCallback = cb }
             .onFailure { Log.w(TAG, "NetworkCallback の登録に失敗", it) }
     }
