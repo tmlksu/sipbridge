@@ -142,6 +142,40 @@ object RelayProtocol {
 
     fun buildPing(ts: Long): String =
         JSONObject().put("t", "ping").put("ts", ts).toString()
+
+    /** `call_stats` を送ってよい relay の最低バージョン (旧 relay は未知の t に error を返す)。 */
+    const val CALL_STATS_MIN_RELAY_VERSION = "0.3.0"
+
+    fun supportsCallStats(relayVersion: String): Boolean =
+        relayVersionAtLeast(relayVersion, CALL_STATS_MIN_RELAY_VERSION)
+
+    /**
+     * v1.2: 通話終了時に 1 回送る品質統計 (docs/QUALITY_STATS.md)。キー名は relay と合意済み。
+     * 番号・表示名などの PII は含めない (logcat にも同じ文字列を出す)。
+     */
+    fun buildCallStats(r: CallStatsReport): String =
+        JSONObject()
+            .put("t", "call_stats")
+            .put("callId", r.callId)
+            .put("dur", r.durMs)
+            .put("net", r.net)
+            .put(
+                "rx", JSONObject()
+                    .put("pkts", r.rxPkts)
+                    .put("gaps", r.rxGaps)
+                    .put("reorder", r.rxReorder)
+                    .put("jitterMs", r.rxJitterMs)
+                    .put("maxGapMs", r.rxMaxGapMs)
+                    .put("stall100", r.rxStall100)
+                    .put("stall200", r.rxStall200)
+                    .put("stall500", r.rxStall500)
+                    .put("reconnects", r.rxReconnects)
+            )
+            .put("jb", JSONObject().put("underrun", r.jbUnderrun).put("overflow", r.jbOverflow))
+            .put("playUnderrun", r.playUnderrun)
+            .put("tx", JSONObject().put("pkts", r.txPkts).put("drop", r.txDrop).put("lost", r.txLost).put("lateMs", r.txLateMs))
+            .put("rttMs", org.json.JSONArray().put(r.rttStartMs).put(r.rttEndMs))
+            .toString()
 }
 
 /**

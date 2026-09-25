@@ -173,4 +173,63 @@ class RelayProtocolTest {
             // ok
         }
     }
+
+    @Test
+    fun `call_stats has agreed schema`() {
+        val r = CallStatsReport(
+            callId = "c1", durMs = 123456, net = "wifi",
+            rxPkts = 6000, rxGaps = 1, rxReorder = 2, rxJitterMs = 3, rxMaxGapMs = 480,
+            rxStall100 = 4, rxStall200 = 2, rxStall500 = 0, rxReconnects = 1,
+            jbUnderrun = 7, jbOverflow = 8, playUnderrun = 9,
+            txPkts = 6100, txDrop = 10, txLost = 12, txLateMs = 11,
+            rttStartMs = 40, rttEndMs = -1
+        )
+        val o = JSONObject(RelayProtocol.buildCallStats(r))
+        assertEquals("call_stats", o.getString("t"))
+        assertEquals("c1", o.getString("callId"))
+        assertEquals(123456L, o.getLong("dur"))
+        assertEquals("wifi", o.getString("net"))
+        val rx = o.getJSONObject("rx")
+        assertEquals(
+            setOf("pkts", "gaps", "reorder", "jitterMs", "maxGapMs", "stall100", "stall200", "stall500", "reconnects"),
+            rx.keySet()
+        )
+        assertEquals(6000L, rx.getLong("pkts"))
+        assertEquals(1L, rx.getLong("gaps"))
+        assertEquals(2L, rx.getLong("reorder"))
+        assertEquals(3, rx.getInt("jitterMs"))
+        assertEquals(480L, rx.getLong("maxGapMs"))
+        assertEquals(4L, rx.getLong("stall100"))
+        assertEquals(2L, rx.getLong("stall200"))
+        assertEquals(0L, rx.getLong("stall500"))
+        assertEquals(1, rx.getInt("reconnects"))
+        val jb = o.getJSONObject("jb")
+        assertEquals(setOf("underrun", "overflow"), jb.keySet())
+        assertEquals(7L, jb.getLong("underrun"))
+        assertEquals(8L, jb.getLong("overflow"))
+        assertEquals(9, o.getInt("playUnderrun"))
+        val tx = o.getJSONObject("tx")
+        assertEquals(setOf("pkts", "drop", "lost", "lateMs"), tx.keySet())
+        assertEquals(6100L, tx.getLong("pkts"))
+        assertEquals(10L, tx.getLong("drop"))
+        assertEquals(12L, tx.getLong("lost"))
+        assertEquals(11L, tx.getLong("lateMs"))
+        val rtt = o.getJSONArray("rttMs")
+        assertEquals(2, rtt.length())
+        assertEquals(40L, rtt.getLong(0))
+        assertEquals(-1L, rtt.getLong(1))
+        assertEquals(
+            setOf("t", "callId", "dur", "net", "rx", "jb", "playUnderrun", "tx", "rttMs"),
+            o.keySet()
+        )
+    }
+
+    @Test
+    fun `call_stats is only for relay 0_3_0 or later`() {
+        assertTrue(RelayProtocol.supportsCallStats("0.3.0"))
+        assertTrue(RelayProtocol.supportsCallStats("0.4.2"))
+        assertTrue(!RelayProtocol.supportsCallStats("0.2.0"))
+        assertTrue(!RelayProtocol.supportsCallStats(""))
+        assertTrue(!RelayProtocol.supportsCallStats("unknown"))
+    }
 }
