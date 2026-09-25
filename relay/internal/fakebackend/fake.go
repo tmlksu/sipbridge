@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/tmlksu/sipbridge/relay/internal/call"
+	"github.com/tmlksu/sipbridge/relay/internal/rtpstats"
 )
 
 // Fake は外部操作で駆動する疑似 SIP バックエンドである。
@@ -148,10 +149,14 @@ func (f *Fake) Dial(to string) (string, error) {
 }
 
 // echoPipe は Send されたパケットを Recv にそのまま返す。
+// 返したパケットは「Asterisk から受けた RTP」として統計に数える
+// (sipbackend の rtpPipe と同じ RTPStats/DroppedPackets を持つ)。
 type echoPipe struct {
-	mu     sync.Mutex
-	ch     chan []byte
-	closed bool
+	mu      sync.Mutex
+	ch      chan []byte
+	closed  bool
+	stats   rtpstats.Stats
+	dropped uint64 // mu で保護
 }
 
 func newEchoPipe() *echoPipe {
@@ -165,12 +170,14 @@ func (p *echoPipe) Send(rtp []byte) error {
 		return fmt.Errorf("パイプは閉じている")
 	}
 	cp := append([]byte(nil), rtp...)
+	p.stats.Observe(cp)
 	select {
 	case p.ch <- cp:
 	default:
 		// 溢れたら古い方を捨てて入れ直す。
 		select {
 		case <-p.ch:
+			p.dropped++
 		default:
 		}
 		select {
@@ -182,6 +189,16 @@ func (p *echoPipe) Send(rtp []byte) error {
 }
 
 func (p *echoPipe) Recv() <-chan []byte { return p.ch }
+
+// RTPStats はエコーしたパケットの統計である。
+func (p *echoPipe) RTPStats() rtpstats.Snapshot { return p.stats.Snapshot() }
+
+// DroppedPackets は受信キュー溢れで捨てたパケット数である。
+func (p *echoPipe) DroppedPackets() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dropped
+}
 
 func (p *echoPipe) Close() error {
 	p.mu.Lock()

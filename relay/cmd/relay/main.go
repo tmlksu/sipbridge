@@ -26,7 +26,7 @@ import (
 )
 
 // RelayVersion は hello.relayVersion として通知する。
-const RelayVersion = "0.2.0"
+const RelayVersion = "0.3.0"
 
 // shutdownGrace は SIGTERM 後に各 account の登録解除 (REGISTER Expires: 0)
 // を送り切るための猶予である。
@@ -118,6 +118,7 @@ func run() error {
 		DefaultPassword: cfg.SIPPassword,
 		DefaultDisplay:  cfg.SIPDisplay,
 		ResumeTimeout:   time.Duration(cfg.ResumeTimeoutSec) * time.Second,
+		PingInterval:    cfg.WSPingInterval,
 	}, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -142,7 +143,7 @@ func run() error {
 		defer cancel()
 		_ = srv.Shutdown(shCtx)
 	}()
-	log.Info("relay 起動", "listen", cfg.Listen,
+	log.Info("relay 起動", "version", RelayVersion, "listen", cfg.Listen, "wsPing", cfg.WSPingInterval.String(),
 		"accounts", hub.AccountCount(), "defaultAccount", cfg.SIPUser, "state", cfg.StateFile)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
