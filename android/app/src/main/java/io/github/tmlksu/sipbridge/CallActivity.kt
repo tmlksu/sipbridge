@@ -77,8 +77,20 @@ class CallActivity : AppCompatActivity(), CallHub.StateListener {
     private val tick = object : Runnable {
         override fun run() {
             refreshStateLine()
-            handler.postDelayed(this, 400)
+            handler.postDelayed(this, nextTickDelayMs())
         }
+    }
+
+    /**
+     * 次の tick までの待ち。呼出中はドットアニメのため 400ms、通話中は経過秒が
+     * 変わる次の 1 秒境界まで (400ms 周期の空振り更新をしない。#23)。
+     * tvState はドットアニメ・経過時間・終了表示で共用しているため Chronometer 化は見送り。
+     */
+    private fun nextTickDelayMs(): Long {
+        val start = CallHub.callStartedAt
+        if (CallHub.state != CallHub.State.IN_CALL || start <= 0L) return 400L
+        val since = (System.currentTimeMillis() - start).coerceAtLeast(0L)
+        return 1000L - (since % 1000L) + 10L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -309,7 +321,7 @@ class CallActivity : AppCompatActivity(), CallHub.StateListener {
     }
 
     /**
-     * 状態行の更新 (tick 400ms ごと + refresh 時)。
+     * 状態行の更新 (tick: 呼出中 400ms / 通話中 1 秒境界ごと + refresh 時)。
      * - 着信中 / 呼出中: 「•••」の 3 点点滅アニメ (1〜3 点を循環)。
      * - 呼出中は 183 early media 時に「呼出中 (相手側応答音)」。
      * - 通話中: 経過時間 mm:ss。

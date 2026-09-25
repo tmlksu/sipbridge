@@ -1,4 +1,4 @@
-# sipbridge relay ⇄ app プロトコル v1 (v1.1 追記: SIP アカウント / hello.account)
+# sipbridge relay ⇄ app プロトコル v1 (v1.1 追記: SIP アカウント / hello.account、v1.2 追記: call_stats)
 
 1 端末 = 1 WebSocket 接続。URL: `wss://<host>/v1/session` (例 `wss://relay.example.com/v1/session`)。
 
@@ -13,7 +13,7 @@
 
 relay は `AUTH_MODE=cf-access` のとき `Cf-Access-Jwt-Assertion` を JWKS (`https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`) で検証し、`aud` が `CF_ACCESS_AUD` と一致しなければ HTTP 401 で拒否する。
 
-Keep-alive: 双方 WS ping/pong を 20 秒周期。40 秒無応答で切断。切断後アプリは 1,2,4,…30 秒の指数バックオフで再接続。
+Keep-alive: 双方 WS ping/pong を 20 秒周期 (relay 側は `WS_PING_INTERVAL` で変更可、既定 20s)。40 秒無応答で切断。切断後アプリは 1,2,4,…30 秒の指数バックオフで再接続。
 
 ## フレーム
 
@@ -47,6 +47,29 @@ CallInfo = `{callId, direction: "in"|"out", state: "ringing"|"active", from, dis
 | `register_push` | `provider` (`fcm`), `token` | push トークン登録。relay が永続化 |
 | `sip_account` | `user`, `password`, `display` (任意) | **v1.1** この端末が使う SIP アカウント (内線) を relay に登録する (下記「SIP アカウント」節)。`user=""` で解除 |
 | `ping` | `ts` | アプリ側 keep-alive (WS ping が使えないクライアント向け) |
+| `call_stats` | `callId`, `dur` (ms), `net`, `rx`, `jb`, `playUnderrun`, `tx`, `rttMs` | **v1.2** 通話終了時に 1 回送る品質統計 (下記「通話品質統計」節)。relay はログに出すだけで応答しない |
+
+## 通話品質統計 (v1.2)
+
+設計: `docs/QUALITY_STATS.md`。アプリは通話終了時に 1 回だけ送る (待機中・通話中の定期送信はしない)。
+
+```json
+{"t":"call_stats","callId":"…","dur":123456,"net":"wifi|cellular|other",
+ "rx":{"pkts":0,"gaps":0,"reorder":0,"jitterMs":0,"maxGapMs":0,"stall100":0,"stall200":0,"stall500":0,"reconnects":0},
+ "jb":{"underrun":0,"overflow":0},"playUnderrun":0,
+ "tx":{"pkts":0,"drop":0,"lost":0,"lateMs":0},"rttMs":[80,-1]}
+```
+
+- アプリは `hello.relayVersion` が `0.3.0` 以上のときだけ送る (旧 relay ≤0.2.0 は未知の `t` に `error bad_message` を返す。切断はしない)。
+- relay は `callId` 以外を解釈せず、`t`/`callId` を除いた JSON をそのままログに埋め込む (項目の追加・型のずれでもエラーにしない)。
+  4096 バイトを超えるメッセージは捨てる。**応答は返さない** (不明・旧 `callId` でも `error` を返さない)。
+- relay は 1 通話 1 行 `call_stats` をログに出す: アプリの `call_stats` を受けた時点 (通話終了の処理より先に届いた場合は終了時)、
+  または通話終了から 5 秒以内に届かなければ relay 側の計測だけで出す。二重には出さない。
+  5 秒を過ぎて届いたもの・記録の無い `callId` は `call_stats_orphan` として別の行に出す。
+- relay 側の計測 (ログのキー): `up` = app→relay 上り RTP の `pkts/gaps/reorder/jitterMs/maxGapMs/stall100/200/500`、
+  `ast` = Asterisk→relay RTP の `pkts/gaps/reorder/jitterMs/qdrop` (qdrop は relay 内受信キュー溢れ)、
+  `txDrop` = relay→app 下りの送信キュー満による破棄数。`dur` は relay が見たメディア開始から終了までの ms。
+- ログに番号・表示名などの PII は出さない (`callId`, `account`=内線, `dev`=デバイス ID のみ)。
 
 ## SIP アカウント (v1.1: 接続情報をアプリ側で設定する)
 

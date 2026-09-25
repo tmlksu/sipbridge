@@ -42,7 +42,7 @@
             android:textColor="@color/nocturne_text_dim"
             android:textSize="13sp" />
 
-        <TextView
+        <Chronometer
             android:id="@+id/tvInCallPill"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -50,7 +50,7 @@
             android:background="@drawable/pill_call"
             android:gravity="center"
             android:padding="10dp"
-            android:text="📞 00:00"
+            android:format="📞 %s"
             android:textColor="@color/nocturne_text"
             android:textSize="14sp"
             android:textStyle="bold"

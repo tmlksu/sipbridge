@@ -21,7 +21,8 @@ import okio.ByteString.Companion.toByteString
  * - ヘッダ: Access Client ID/Secret が設定されていれば Service Token 方式、
  *   空なら開発用 `Authorization: Bearer <devToken>`。`X-Device-Id` /
  *   `X-Client-Version` を必ず付ける。
- * - WS ping/pong 20 秒 (OkHttp の pingInterval)。切断時は 1,2,4,…30 秒の
+ * - WS ping: relay が server→client に 20 秒周期で送る (OkHttp が自動で pong)。
+ *   アプリ側の OkHttp ping は [CLIENT_PING_INTERVAL_SEC] (60 秒) の補助。切断時は 1,2,4,…30 秒の
  *   指数バックオフで再接続し、接続直後の `hello` で状態同期する (呼び出し側で処理)。
  *   ただし通話中 ([callActive] が true) は relay の resume 猶予内に戻れるよう
  *   バックオフを [CALL_MAX_BACKOFF_SEC] にクランプする。
@@ -52,11 +53,34 @@ class RelayClient(
         fun onDisconnected()
         /** バイナリフレーム (RTP パケットそのまま)。通話中のみ届く。 */
         fun onRtpReceived(rtp: ByteArray)
+        /** JSON `pong` (`ping` の ts をそのまま返す)。通話品質の RTT 計測用 (issue #26)。 */
+        fun onPong(ts: Long) {}
+        /**
+         * WS が開いた (hello より前)。[ws] に代入する前に呼ぶため、ここで記録した時刻は
+         * 新しい接続が送信に使われ始めるより必ず前になる (通話中の下り途絶監視の猶予用)。
+         */
+        fun onConnected() {}
     }
 
     companion object {
         private const val TAG = "RelayClient"
         private const val MAX_BACKOFF_SEC = 30L
+        /**
+         * OkHttp の client→server WS ping 周期 (#25)。
+         *
+         * relay の pingLoop が server→client に 20 秒周期で ping を送り、無応答なら切るため、
+         * 接続の維持 (Cloudflare の約 100 秒アイドル切断・NAT) と relay 側の半死に刈り取りは
+         * そちらで足りる。アプリ側で 20 秒周期を重ねると 20 秒あたり制御フレームが倍になり、
+         * relay の ping と位相がずれるぶんモバイルの radio も余計に起こす。
+         *
+         * 一方 OkHttp は受けた ping を生存確認に使わず (readTimeout も WS では無効)、
+         * ブラックホール化した TCP をアプリ側で検知できるのはこの ping の pong 待ちだけ
+         * (次の ping 時点で前の pong が未着なら onFailure → 再接続)。網切替 (Wi-Fi ↔ モバイル)
+         * による主なブラックホール化は BridgeService の NetworkCallback → [onNetworkChanged]
+         * で即座に張り直すため、ここで拾うのは「同じ網のまま上流が死んだ」残りのケース。
+         * 検知は 1〜2 周期 (60〜120 秒) で、待機中の着信取りこぼし窓として許容できる長さに留める。
+         */
+        const val CLIENT_PING_INTERVAL_SEC = 60L
         /** 通話中の再接続バックオフ上限。relay の resume 猶予より十分短くする。 */
         private const val CALL_MAX_BACKOFF_SEC = 2L
         /** 再送待ちに残せる制御メッセージ数。 */
@@ -204,7 +228,7 @@ class RelayClient(
             // 端末が SO_SNDBUF を本当に絞ったかの確認用 (接続ごとに 1 行)。
             Log.i(TAG, "relay socket SO_SNDBUF requested=$RELAY_SOCKET_SNDBUF_BYTES actual=$actual")
         })
-        .pingInterval(20, TimeUnit.SECONDS)
+        .pingInterval(CLIENT_PING_INTERVAL_SEC, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // 長時間接続のためリードタイムアウト無し
         .build()
@@ -224,6 +248,16 @@ class RelayClient(
     private val pendingControl = ArrayDeque<PendingMsg>()
     /** 上り RTP の滞留判定。接続 (ws) ごとに [RtpSendGate.reset] する。 */
     private val rtpGate = RtpSendGate()
+    /**
+     * 上り RTP の滞留破棄の累計 (接続をまたいで数える。[rtpGate] は接続ごとにリセットされる)。
+     * 書くのは rtp-send スレッドのみ。通話品質の `tx.drop` は通話開始・終了時の差分で取る。
+     */
+    @Volatile var rtpDropTotal: Long = 0L
+        private set
+
+    /** WS 未接続 (再接続待ち) で送れなかった上り RTP の累計 (call_stats の tx.lost)。rtp-send スレッドのみ書く。 */
+    @Volatile var rtpNoConnTotal: Long = 0L
+        private set
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun isConnected(): Boolean = connected && ws != null
@@ -322,6 +356,7 @@ class RelayClient(
 
     private inner class SocketListener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            runCatching { listener.onConnected() }
             synchronized(lock) {
                 ws = webSocket
                 if (pending === webSocket) pending = null
@@ -350,7 +385,7 @@ class RelayClient(
                 is RelayProtocol.RelayMsg.AnsweredMsg -> listener.onAnswered(msg.v)
                 is RelayProtocol.RelayMsg.EndedMsg -> listener.onEnded(msg.v)
                 is RelayProtocol.RelayMsg.ErrorMsg -> listener.onError(msg.v.code, msg.v.message)
-                is RelayProtocol.RelayMsg.PongMsg -> { /* keep-alive 応答。特段処理なし */ }
+                is RelayProtocol.RelayMsg.PongMsg -> listener.onPong(msg.v.ts)
             }
         }
 
@@ -473,9 +508,42 @@ class RelayClient(
     fun sendSipAccount(user: String, password: String, display: String = ""): Boolean =
         sendText(RelayProtocol.buildSipAccount(user, password, display))
 
-    /** keep-alive。落としても次の ping で足りるので再送しない。 */
+    /**
+     * JSON レベルの keep-alive (`{"t":"ping"}`)。落としても次の ping で足りるので再送しない。
+     * 現状アプリ内に呼び出し箇所は無い (WS ping で足りるため周期送信はしていない)。
+     */
     fun pingNow(): Boolean =
         sendText(RelayProtocol.buildPing(System.currentTimeMillis()), queueOnFailure = false)
+
+    /** RTT 計測用の JSON ping (通話の開始直後・終了直前に 1 回ずつ)。再送しない。 */
+    fun ping(ts: Long): Boolean = sendText(RelayProtocol.buildPing(ts), queueOnFailure = false)
+
+    /** 通話品質の `call_stats` (issue #26)。切断中なら捨てる (再送待ちに積まない)。 */
+    fun sendCallStats(json: String): Boolean = sendText(json, queueOnFailure = false)
+
+    /**
+     * 通話中に下り RTP が途絶えたときの張り直し (issue #26 の途絶監視)。
+     * 同じ網のまま上流が死ぬと OkHttp の ping では検知が最大 120 秒かかり、relay の
+     * resume 猶予 (10 秒) に間に合わないため、確立済みの接続を捨てて即座に接続し直す。
+     * 接続中 (ハンドシェイク中) や未接続なら既に再接続の途中なので何もせず false。
+     * どのスレッドから呼んでもよい (実接続は main スレッドで行う)。
+     */
+    fun reconnectStalled(): Boolean {
+        val old = synchronized(lock) {
+            if (!wantConnect) return false
+            val o = ws ?: return false
+            if (pending != null) return false
+            ws = null
+            connected = false
+            backoffSec = 1L
+            o
+        }
+        Log.w(TAG, "下り RTP が途絶えたため WS を張り直す")
+        runCatching { old.cancel() }
+        listener.onDisconnected()
+        handler.post { if (wantConnect) openSocket() }
+        return true
+    }
 
     /**
      * RTP パケット (12B ヘッダ + ペイロード) をバイナリフレームで送る。通話中のみ。
@@ -484,8 +552,12 @@ class RelayClient(
      * 呼び出し側で進め続けるため、相手からは損失に見える (再送はしない)。
      */
     fun sendRtp(rtp: ByteArray): Boolean {
-        val s = ws ?: return false
+        val s = ws ?: run {
+            rtpNoConnTotal++
+            return false
+        }
         if (rtpGate.shouldDrop(s.queueSize())) {
+            rtpDropTotal++
             if (rtpGate.shouldLogDrop()) {
                 Log.w(TAG, "RTP 送信キュー滞留のため破棄 (累計 ${rtpGate.dropped} 件)")
             }

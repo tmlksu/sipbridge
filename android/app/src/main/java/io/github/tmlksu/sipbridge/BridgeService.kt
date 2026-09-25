@@ -1,5 +1,6 @@
 package io.github.tmlksu.sipbridge
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.app.Service
 import android.content.Context
@@ -9,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
@@ -20,6 +22,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.ServiceCompat
 
@@ -55,6 +58,8 @@ class BridgeService : Service(), RelayClient.Listener {
         const val ACT_PROMOTE_MIC = "sipbridge.PROMOTE_MIC"
         /** 録音開始から無音化を確かめるまでの待ち。 */
         private const val MIC_CHECK_DELAY_MS = 800L
+        /** 通話終了時、終了直前の ping の pong を待って call_stats を送るまでの上限 (issue #26)。 */
+        private const val CALL_STATS_PONG_WAIT_MS = 1_500L
         /** `SipConnectionService.onCreateOutgoingConnection` からの発信継続
          *  (`CallActivity` は起動しない — OS 標準画面が出ているため)。 */
         const val ACT_DIAL_TELECOM = "sipbridge.DIAL_TELECOM"
@@ -211,8 +216,14 @@ class BridgeService : Service(), RelayClient.Listener {
     /** 音声経路の変更前の状態 (通話終了で元に戻す)。 */
     private var prevSpeakerOn: Boolean = false
     private var audioRouteSet: Boolean = false
-    /** 通話中ピル代替 (オーバーレイ権限無し) の常駐通知ティッカー。 */
-    private var inCallNotifyTick: Runnable? = null
+    /**
+     * 通話中ピル代替 (オーバーレイ権限無し) として常駐通知を差し替えているか。
+     * [updateServiceNote] は true の間、通常の常駐通知ではなく代替通知を出し直す
+     * (通話中に登録状態などで updateServiceNote が呼ばれても代替表示を潰さないため)。
+     */
+    private var inCallNoteMode: InCallNoteMode = InCallNoteMode.NONE
+
+    private enum class InCallNoteMode { NONE, OUTGOING, IN_CALL }
     /** この呼のティア。呼ごとにセットアップ時点で確定し、通話中は変えない。
      *  `CallHub.resetCall()` のタイミングで LEGACY に戻す。 */
     @Volatile private var currentTier: CallTier = CallTier.LEGACY
@@ -226,6 +237,33 @@ class BridgeService : Service(), RelayClient.Listener {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     /** 現在使っているデフォルト網。別の網に切り替わったことの判定に使う。 */
     @Volatile private var activeNetwork: Network? = null
+
+    // ---- 通話品質の計測 (issue #26, docs/QUALITY_STATS.md) ----
+    /** 1 通話分の計測のうち、RtpEngine の外で持つもの (callId・開始時刻・網・RTT・tx.drop / tx.lost の基準)。 */
+    private class CallStatsSession(
+        val callId: String,
+        val startedElapsedMs: Long,
+        val net: String,
+        val txDropBase: Long,
+        val txLostBase: Long
+    ) {
+        val rtt = CallRtt()
+        @Volatile var endPingOk = false
+        /** 通話終了時に確定した統計 (RTT を除く)。null = 通話中。 */
+        @Volatile var report: CallStatsReport? = null
+        val sent = java.util.concurrent.atomic.AtomicBoolean(false)
+    }
+    /** 通話中の計測。startCallMedia で作り stopCallMedia で終える。 */
+    @Volatile private var statsSession: CallStatsSession? = null
+    /** 終了済みで、終了直前の ping の pong 待ちの計測。 */
+    @Volatile private var endingStats: CallStatsSession? = null
+    /**
+     * 下り途絶時の張り直し (RtpEngine の再生スレッドから呼ばれる)。通話中 (IN_CALL) だけ実行する。
+     * 1 つのインスタンスを使い回す (呼び出しごとのアロケーションを避ける)。
+     */
+    private val rxStallAction: () -> Boolean = {
+        CallHub.state == CallHub.State.IN_CALL && client?.reconnectStalled() == true
+    }
 
     inner class LocalBinder : Binder() { fun service(): BridgeService = this@BridgeService }
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -329,7 +367,8 @@ class BridgeService : Service(), RelayClient.Listener {
 
     /**
      * 網切替 (Wi-Fi ↔ モバイル) を検知して [RelayClient] に通知する。
-     * OkHttp は旧網のソケットを ping タイムアウト (最大 20 秒弱) まで生きていると見なすため、
+     * OkHttp は旧網のソケットを ping タイムアウト (RelayClient.CLIENT_PING_INTERVAL_SEC の
+     * 1〜2 周期) まで生きていると見なすため、
      * この通知が無いと再接続がその分遅れ、通話中なら relay の resume 猶予を食いつぶす。
      *
      * **デフォルト網**のコールバックを使う。`registerNetworkCallback(INTERNET)` だと
@@ -581,7 +620,10 @@ class BridgeService : Service(), RelayClient.Listener {
     /**
      * 型を明示して前面化する。成功したら true。[withMic] なら phoneCall|microphone、
      * そうでなければ phoneCall のみ (API 29 は型の指定だけ、microphone 型は API 30 から)。
+     * ForegroundServiceType: マニフェストに foregroundServiceType="phoneCall|microphone" があるのに
+     * gms flavor の lint だけが誤検知するため抑止する。
      */
+    @SuppressLint("ForegroundServiceType")
     private fun startForegroundTyped(withMic: Boolean): Boolean {
         val cfg = BridgeConfig.load(this)
         val pushIdle = cfg.mode == BridgeMode.PUSH &&
@@ -636,14 +678,15 @@ class BridgeService : Service(), RelayClient.Listener {
         val pushIdle = cfg.mode == BridgeMode.PUSH &&
             client?.isConnected() != true && CallHub.state == CallHub.State.IDLE
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-        runCatching {
-            nm.notify(
-                NotificationHelper.ID_SERVICE,
-                NotificationHelper.serviceNotification(
-                    this, pushIdle, CallHub.extension, cfg.serviceNotificationQuiet
-                )
-            )
+        val quiet = cfg.serviceNotificationQuiet
+        val note = when {
+            inCallNoteMode == InCallNoteMode.IN_CALL && CallHub.state == CallHub.State.IN_CALL ->
+                NotificationHelper.inCallNotification(this, CallHub.callStartedAt, quiet)
+            inCallNoteMode == InCallNoteMode.OUTGOING && CallHub.state == CallHub.State.RINGING && CallHub.outgoing ->
+                NotificationHelper.outgoingNotification(this, CallHub.from, quiet)
+            else -> NotificationHelper.serviceNotification(this, pushIdle, CallHub.extension, quiet)
         }
+        runCatching { nm.notify(NotificationHelper.ID_SERVICE, note) }
     }
 
     /**
@@ -943,6 +986,21 @@ class BridgeService : Service(), RelayClient.Listener {
         CallHub.rtp?.onRtpReceived(rtp)
     }
 
+    override fun onConnected() {
+        // 接続し直した: 下り途絶監視は resume 後の最初の RTP をここから待つ
+        // (別経路で張り直した直後の新しい接続を切らないため)。
+        CallHub.rtp?.stallMonitor?.onConnected(SystemClock.elapsedRealtimeNanos())
+    }
+
+    override fun onPong(ts: Long) {
+        val now = SystemClock.elapsedRealtime()
+        statsSession?.rtt?.onPong(ts, now)
+        val ending = endingStats ?: return
+        if (ending.rtt.onPong(ts, now) && ending.rtt.endMs >= 0 && ending.report != null) {
+            emitCallStats(ending)
+        }
+    }
+
     // ---- 着信提示 (EchoSIP 流用: 全画面優先・2.5 秒後フォールバック) ----
 
     private fun presentIncoming(callId: String, from: String, display: String, pt: Int) {
@@ -1170,15 +1228,29 @@ class BridgeService : Service(), RelayClient.Listener {
     // ---- 通話メディア ----
 
     private fun startCallMedia(pt: Int) {
-        stopCallMedia()
+        // 同じ呼で二重に始めた場合の前のエンジン分は送らない (終了経路は必ず stopCallMedia を通る)。
+        stopCallMedia(emitStats = false)
         ensureMicForeground()
         val engine = RtpEngine(
             payloadType = if (pt == 8) 8 else 0,
             micGain = CallHub.micGain
         )
-        engine.sink = RtpEngine.MediaSink { rtp -> client?.sendRtp(rtp) }
+        engine.sink = RtpEngine.MediaSink { rtp -> client?.sendRtp(rtp) == true }
+        engine.onRxStall = rxStallAction
+        val stats = CallStatsSession(
+            callId = CallHub.callId,
+            startedElapsedMs = SystemClock.elapsedRealtime(),
+            net = currentNetType(),
+            txDropBase = client?.rtpDropTotal ?: 0L,
+            txLostBase = client?.rtpNoConnTotal ?: 0L
+        )
+        statsSession = stats
         CallHub.rtp = engine
         runCatching { engine.start() }
+        // RTT (開始直後): 既存の JSON ping を 1 回だけ。
+        val ts = SystemClock.elapsedRealtime()
+        stats.rtt.markStartPing(ts)
+        client?.ping(ts)
         // Android 11〜13 はバックグラウンド起動でも microphone 型の前面化が例外にならず、
         // マイクが使えないことを検出できない。録音が始まった後に「無音化 (silenced)」されて
         // いないかを見て、されていれば見えている画面経由で付け直す。
@@ -1198,9 +1270,94 @@ class BridgeService : Service(), RelayClient.Listener {
         launchMicPromote()
     }
 
-    private fun stopCallMedia() {
-        runCatching { CallHub.rtp?.stop() }
+    private fun stopCallMedia(emitStats: Boolean = true) {
+        val stats = statsSession
+        // RTT (終了直前): hangup 経路では送信前に済んでいる。ended 受信時はここで送る。
+        if (emitStats && stats != null) sendEndPing(stats)
+        val engine = CallHub.rtp
+        runCatching { engine?.stop() }
         CallHub.rtp = null
+        statsSession = null
+        if (stats == null || engine == null) return
+        if (!emitStats) {
+            Log.i(TAG, "call_stats: 同じ呼のメディア再開始のため前の計測は捨てる")
+            return
+        }
+        stats.report = buildCallStatsReport(stats, engine)
+        if (!stats.endPingOk || stats.rtt.endMs >= 0) {
+            emitCallStats(stats)
+            return
+        }
+        // 終了直前の ping の pong を少しだけ待つ (通話終了時の 1 回きり。待機中の周期処理ではない)。
+        endingStats = stats
+        mainHandler.postDelayed({ emitCallStats(stats) }, CALL_STATS_PONG_WAIT_MS)
+    }
+
+    /** 終了直前の RTT 計測用 ping (1 通話 1 回)。hangup/reject の送信前にも呼ぶ。 */
+    private fun sendEndPing(stats: CallStatsSession? = statsSession) {
+        if (stats == null || stats.rtt.endPingSent) return
+        val ts = SystemClock.elapsedRealtime()
+        stats.rtt.markEndPing(ts)
+        stats.endPingOk = client?.ping(ts) == true
+    }
+
+    private fun buildCallStatsReport(s: CallStatsSession, e: RtpEngine): CallStatsReport {
+        val rx = e.rxStats
+        val dropNow = client?.rtpDropTotal ?: s.txDropBase
+        val lostNow = client?.rtpNoConnTotal ?: s.txLostBase
+        return CallStatsReport(
+            callId = s.callId,
+            durMs = (SystemClock.elapsedRealtime() - s.startedElapsedMs).coerceAtLeast(0L),
+            net = s.net,
+            rxPkts = rx.pkts,
+            rxGaps = rx.gaps,
+            rxReorder = rx.reorder,
+            rxJitterMs = rx.jitterMs,
+            rxMaxGapMs = rx.maxGapMs,
+            rxStall100 = rx.stall100,
+            rxStall200 = rx.stall200,
+            rxStall500 = rx.stall500,
+            rxReconnects = e.stallMonitor.reconnects,
+            jbUnderrun = e.jbUnderrun,
+            jbOverflow = e.jbOverflow,
+            playUnderrun = e.playUnderrun,
+            txPkts = e.txPkts,
+            txDrop = (dropNow - s.txDropBase).coerceAtLeast(0L),
+            txLost = (lostNow - s.txLostBase).coerceAtLeast(0L),
+            txLateMs = e.txMaxLateNs / 1_000_000L,
+            rttStartMs = -1L,
+            rttEndMs = -1L
+        )
+    }
+
+    /**
+     * call_stats を 1 回だけ出す: logcat に 1 行 (PII なし)、relay が 0.3.0 以上なら送信。
+     * WS が切れていれば捨てる (再送待ちに積まない)。どのスレッドから呼んでもよい。
+     */
+    private fun emitCallStats(s: CallStatsSession) {
+        val base = s.report ?: return
+        if (!s.sent.compareAndSet(false, true)) return
+        if (endingStats === s) endingStats = null
+        val json = RelayProtocol.buildCallStats(base.copy(rttStartMs = s.rtt.startMs, rttEndMs = s.rtt.endMs))
+        Log.i(TAG, "call_stats $json")
+        val ver = CallHub.relayVersion
+        if (!RelayProtocol.supportsCallStats(ver)) {
+            Log.i(TAG, "call_stats: relay $ver は未対応のため送らない")
+            return
+        }
+        if (client?.sendCallStats(json) != true) Log.i(TAG, "call_stats: 未接続のため送らない")
+    }
+
+    /** 通話開始時の網種別 (wifi / cellular / other)。NetworkCallback が追っているデフォルト網を見る。 */
+    private fun currentNetType(): String {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return "other"
+        val n = activeNetwork ?: cm.activeNetwork ?: return "other"
+        val caps = runCatching { cm.getNetworkCapabilities(n) }.getOrNull() ?: return "other"
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            else -> "other"
+        }
     }
 
     // ---- 全画面UIの表示状態に合わせた排他制御 ----
@@ -1253,52 +1410,37 @@ class BridgeService : Service(), RelayClient.Listener {
     /**
      * 通話中ピルを表示する (UI-DESIGN §3.2)。**発信呼出中も対象**
      * (この間は「📞 呼出中」表示)。
-     * オーバーレイ権限が無い場合は常駐通知を「通話中 mm:ss — タップで戻る」
-     * (呼出中は「<番号> を呼び出し中」) に更新して代替する。
+     * オーバーレイ権限が無い場合は常駐通知を「通話中」+ 経過時間 chronometer
+     * (呼出中は「<番号> を呼び出し中」) に差し替えて代替する。
      */
     fun showInCallPill() {
         // ティア A では OS 標準の通話中通知があるためピルは出さない。
         if (suppressOwnUi()) return
         val ringingOut = CallHub.state == CallHub.State.RINGING && CallHub.outgoing
         if (CallHub.state != CallHub.State.IN_CALL && !ringingOut) return
-        hideInCallPill()
+        // 既存のピル/代替通知を畳む (常駐通知の出し直しは下でまとめて 1 回だけ)
+        val hadNote = inCallNoteMode != InCallNoteMode.NONE
+        inCallNoteMode = InCallNoteMode.NONE
+        overlay?.hideInCallPill()
         val canOverlay = BridgeConfig.load(this).overlayEnabled && overlay?.canDraw() == true
         if (canOverlay) {
+            if (hadNote) updateServiceNote()
             // 呼出中は startedAt=0 を渡す (経過時間ではなく「呼出中」表示)
             overlay?.showInCallPill(if (ringingOut) 0L else CallHub.callStartedAt) {
                 startActivity(CallOverlayManager.callActivityIntent(this))
             }
-        } else if (ringingOut) {
-            runCatching {
-                (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
-                    .notify(
-                        NotificationHelper.ID_SERVICE,
-                        NotificationHelper.outgoingNotification(this, CallHub.from, serviceQuiet())
-                    )
-            }
         } else {
-            // 代替: 常駐通知を通話中表示にし、1 秒ごとに経過時間を更新する
-            val tick = object : Runnable {
-                override fun run() {
-                    if (CallHub.state != CallHub.State.IN_CALL) return
-                    val s = ((System.currentTimeMillis() - CallHub.callStartedAt) / 1000).toInt().coerceAtLeast(0)
-                    runCatching {
-                        (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
-                            .notify(NotificationHelper.ID_SERVICE, NotificationHelper.inCallNotification(this@BridgeService, s, serviceQuiet()))
-                    }
-                    inCallNotifyTick = this
-                    mainHandler.postDelayed(this, 1000)
-                }
-            }
-            inCallNotifyTick = tick
-            mainHandler.post(tick)
+            // 代替: 常駐通知を「呼出中」/「通話中」表示に差し替える。
+            // 通話中の経過時間は通知の chronometer (setWhen + setUsesChronometer) が
+            // SystemUI 側でカウントアップするため、発行は状態が変わったときだけ (#23)。
+            inCallNoteMode = if (ringingOut) InCallNoteMode.OUTGOING else InCallNoteMode.IN_CALL
+            updateServiceNote()
         }
     }
 
     /** 通話中ピル・代替通知を畳み、通常の常駐通知に戻す。 */
     fun hideInCallPill() {
-        inCallNotifyTick?.let { mainHandler.removeCallbacks(it) }
-        inCallNotifyTick = null
+        inCallNoteMode = InCallNoteMode.NONE
         overlay?.hideInCallPill()
         updateServiceNote()
     }
@@ -1377,6 +1519,7 @@ class BridgeService : Service(), RelayClient.Listener {
         }
         TelecomCallRegistry.setDisconnected(DisconnectCause.REJECTED)
         TelecomCallRegistry.clear()
+        sendEndPing()
         CallHub.session?.reject()
         stopCallMedia()
         restoreAudioRoute()
@@ -1401,6 +1544,7 @@ class BridgeService : Service(), RelayClient.Listener {
         }
         TelecomCallRegistry.setDisconnected(DisconnectCause.LOCAL)
         TelecomCallRegistry.clear()
+        sendEndPing()
         CallHub.session?.hangup()
         stopCallMedia()
         restoreAudioRoute()

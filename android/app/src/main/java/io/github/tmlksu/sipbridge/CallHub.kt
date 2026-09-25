@@ -32,8 +32,24 @@ object CallHub {
     @Volatile var relayVersion: String = ""
     /** 発信中か (dial 送信後 ringing/answered 待ち)。 */
     @Volatile var outgoing: Boolean = false
-    /** IN_CALL に入った時刻 (System.currentTimeMillis)。経過時間表示・ピル用。 */
+    /**
+     * IN_CALL に入った時刻 (System.currentTimeMillis = epoch ms)。経過時間表示の唯一の基準。
+     * 通知 (`setWhen`) はこの epoch 値をそのまま使い、`Chronometer` (elapsedRealtime 基準) には
+     * [callStartedElapsedRealtime] で換算した値を渡す (基準の取り違え防止)。
+     */
     @Volatile var callStartedAt: Long = 0L
+
+    /**
+     * [callStartedAt] を `SystemClock.elapsedRealtime()` 基準に換算する (`Chronometer.base` 用)。
+     * 未開始 (0) なら現在時刻 (= 00:00) を返す。
+     */
+    fun callStartedElapsedRealtime(): Long {
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
+        val start = callStartedAt
+        if (start <= 0L) return nowElapsed
+        val sinceStart = (System.currentTimeMillis() - start).coerceAtLeast(0L)
+        return nowElapsed - sinceStart
+    }
     /** 発信呼出中、183 early media (相手側応答音あり) のとき true。 */
     @Volatile var earlyMedia: Boolean = false
     @Volatile var session: CallSession? = null
