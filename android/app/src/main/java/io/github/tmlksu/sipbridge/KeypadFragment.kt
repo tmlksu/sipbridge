@@ -10,6 +10,7 @@ import android.view.HapticFeedbackConstants
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Chronometer
 import android.widget.GridLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -30,7 +31,7 @@ class KeypadFragment : Fragment(), CallHub.StateListener {
 
     private lateinit var tvStatusPill: TextView
     private lateinit var tvModeChip: TextView
-    private lateinit var tvInCallPill: TextView
+    private lateinit var tvInCallPill: Chronometer
     private lateinit var tvNumber: TextView
     private lateinit var tvCaption: TextView
     private lateinit var keypadGrid: GridLayout
@@ -40,9 +41,8 @@ class KeypadFragment : Fragment(), CallHub.StateListener {
 
     private val input = StringBuilder()
     private var pendingAction: (() -> Unit)? = null
-    /** アプリ内通話中ピル (§3.2) の 1 秒更新用。 */
-    private val pillHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var pillTick: Runnable? = null
+    /** アプリ内通話中ピルの Chronometer に設定済みの通話開始時刻 (epoch ms)。0 = 停止中。 */
+    private var pillStartedAt = 0L
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
@@ -96,7 +96,7 @@ class KeypadFragment : Fragment(), CallHub.StateListener {
     override fun onPause() {
         super.onPause()
         CallHub.removeListener(this)
-        stopPillTick()
+        stopPill()
     }
 
     override fun onChanged() {
@@ -234,39 +234,29 @@ class KeypadFragment : Fragment(), CallHub.StateListener {
         // アプリ内通話中ピル: 通話中のみ上部右に「📞 mm:ss」(タップで通話画面)
         if (CallHub.state == CallHub.State.IN_CALL) {
             tvInCallPill.visibility = View.VISIBLE
-            updatePillText()
-            startPillTick()
+            startPill()
         } else {
             tvInCallPill.visibility = View.GONE
-            stopPillTick()
+            stopPill()
         }
     }
 
-    private fun updatePillText() {
+    /**
+     * ピルの Chronometer を通話開始時刻に合わせて動かす。refreshStatus は状態変化のたびに
+     * 呼ばれるため、開始時刻が変わったとき (resume で relay の startedAt に置き換わった等) だけ
+     * base を設定し直す。
+     */
+    private fun startPill() {
         val start = CallHub.callStartedAt
-        val s = if (start > 0) ((System.currentTimeMillis() - start) / 1000).toInt().coerceAtLeast(0) else 0
-        tvInCallPill.text = "📞 %02d:%02d".format(s / 60, s % 60)
+        if (start == pillStartedAt && start != 0L) return
+        pillStartedAt = start
+        tvInCallPill.base = CallHub.callStartedElapsedRealtime()
+        tvInCallPill.start()
     }
 
-    private fun startPillTick() {
-        if (pillTick != null) return
-        val tick = object : Runnable {
-            override fun run() {
-                if (CallHub.state != CallHub.State.IN_CALL) {
-                    stopPillTick()
-                    return
-                }
-                activity?.runOnUiThread { if (isAdded) updatePillText() }
-                pillHandler.postDelayed(this, 1000)
-            }
-        }
-        pillTick = tick
-        pillHandler.postDelayed(tick, 1000)
-    }
-
-    private fun stopPillTick() {
-        pillTick?.let { pillHandler.removeCallbacks(it) }
-        pillTick = null
+    private fun stopPill() {
+        tvInCallPill.stop()
+        pillStartedAt = 0L
     }
 
     // ---- 発信 ----
