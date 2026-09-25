@@ -73,3 +73,26 @@ func TestDecodeErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeCallStats(t *testing.T) {
+	raw := `{"t":"call_stats","callId":"c1","dur":1234,"net":"wifi","rx":{"pkts":10},"future":{"x":1}}`
+	msg, err := Decode([]byte(raw))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	cs, ok := msg.(*CallStats)
+	if !ok {
+		t.Fatalf("型 %T", msg)
+	}
+	if cs.CallID != "c1" || string(cs.Raw) != raw {
+		t.Fatalf("got %+v", cs)
+	}
+	// callId の型ずれでもエラーにしない (callId は空)。
+	msg, err = Decode([]byte(`{"t":"call_stats","callId":5}`))
+	if err != nil {
+		t.Fatalf("Decode (型ずれ): %v", err)
+	}
+	if cs := msg.(*CallStats); cs.CallID != "" {
+		t.Fatalf("callId = %q", cs.CallID)
+	}
+}

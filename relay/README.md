@@ -29,6 +29,7 @@ curl localhost:8080/healthz   # {"status":"ok"}
 | `RTP_PORT_MIN/MAX` | `20000/20100` | T2 の RTP 用 |
 | `BACKEND` | `fake` | `fake`\|`sip` (sip: 実 SIP サーバ対向の本番用) |
 | `RESUME_TIMEOUT_SEC` | `30` | 通話中に WS が切れてから BYE するまでの猶予 (1..300)。アプリの再接続が収まる値にする |
+| `WS_PING_INTERVAL` | `20s` | relay→app の WS ping 周期 (5s..5m。`45s` 形式または整数秒)。Cloudflare の WS アイドル切断 (~100 秒) より短くする。待機コスト計測 (docs/QUALITY_STATS.md E1) 用 |
 | `LOG_LEVEL` | `info` | debug\|info\|warn\|error |
 | `STATE_FILE` | `/var/lib/sipbridge/state.json` | 状態ファイル (account / 端末結び付け / push トークン, 0600)。旧名 `PUSH_STATE_FILE` も読み、旧形式は起動時に自動移行 |
 | `FCM_PROJECT_ID` | (無) | FCM 送信に使用 (Firebase プロジェクト ID)。空なら push は no-op |
