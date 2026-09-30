@@ -98,20 +98,27 @@ object NotificationHelper {
 
     /**
      * 通話中の常駐通知 (UI-DESIGN §3.2 の代替表示。オーバーレイ権限が無い場合)。
-     * 本文「通話中 mm:ss」。タップで通話画面に戻る。
+     * タイトル「通話中」+ ヘッダの経過時間 (chronometer)。タップで通話画面に戻る。
      */
-    fun inCallNotification(ctx: Context, elapsedSec: Int, quiet: Boolean = false): Notification {
+    fun inCallNotification(ctx: Context, startedAtEpochMs: Long, quiet: Boolean = false): Notification {
         val tap = PendingIntent.getActivity(
             ctx, 4, CallOverlayManager.callActivityIntent(ctx),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val mmss = "%02d:%02d".format(elapsedSec / 60, elapsedSec % 60)
+        // 経過時間は SystemUI 側の chronometer に任せる (#23)。when = 通話開始の epoch ms
+        // (CallHub.callStartedAt と同じ基準)。これで毎秒の notify() 再発行が不要になる。
+        val start = if (startedAtEpochMs > 0) startedAtEpochMs else System.currentTimeMillis()
         val b = NotificationCompat.Builder(ctx, if (quiet) CH_SERVICE_QUIET else CH_SERVICE)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentTitle(ctx.getString(R.string.notif_incall_title))
-            .setContentText(ctx.getString(R.string.notif_incall_text, mmss))
+            .setContentText(ctx.getString(R.string.notif_incall_text))
             .setContentIntent(tap)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setWhen(start)
+            .setUsesChronometer(true)
+            .setChronometerCountDown(false)
+        // quiet でも chronometer は表示される (showWhen とは独立) ので setShowWhen(false) は残す
         if (quiet) b.setSilent(true).setShowWhen(false).setPriority(NotificationCompat.PRIORITY_MIN)
         return b.build()
     }

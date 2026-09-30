@@ -26,7 +26,12 @@ const (
 	TRegisterPush = "register_push"
 	TSipAccount   = "sip_account"
 	TPing         = "ping"
+	TCallStats    = "call_stats"
 )
+
+// MaxCallStatsSize は call_stats を受け付ける上限 (バイト) である。
+// 超えたものは relay が捨てる (応答は返さない)。
+const MaxCallStatsSize = 4096
 
 // CallInfo は通話の概要 (hello.call ほかで使用)。
 type CallInfo struct {
@@ -147,6 +152,16 @@ type Ping struct {
 	Ts int64  `json:"ts"`
 }
 
+// CallStats は通話終了時にアプリが 1 回送る品質統計である (v1.2)。
+// relay は callId 以外を解釈せず、受信した JSON (Raw) をそのままログに載せる
+// (アプリ側の項目追加・スキーマのずれに強くするため)。relay は応答しない。
+type CallStats struct {
+	T      string `json:"t"`
+	CallID string `json:"callId"`
+	// Raw は受信したメッセージ全体 (Decode が設定する)。
+	Raw json.RawMessage `json:"-"`
+}
+
 // envelope は t だけを先読みするための型。
 type envelope struct {
 	T string `json:"t"`
@@ -197,6 +212,19 @@ func Decode(data []byte) (any, error) {
 		v = &SipAccount{}
 	case TPing:
 		v = &Ping{}
+	case TCallStats:
+		// 型のずれ (callId が数値など) でも error 応答は返さない。
+		// 解釈できなかった callId は空のまま (relay は「不明な通話」として扱う)。
+		cs := &CallStats{T: TCallStats, Raw: data}
+		var head struct {
+			CallID any `json:"callId"`
+		}
+		if json.Unmarshal(data, &head) == nil {
+			if id, ok := head.CallID.(string); ok {
+				cs.CallID = id
+			}
+		}
+		return cs, nil
 	case "":
 		return nil, fmt.Errorf("フィールド t が無い")
 	default:

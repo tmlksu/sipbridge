@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func setEnv(t *testing.T, kv map[string]string) {
@@ -20,7 +21,7 @@ func clearEnv(t *testing.T) {
 		"SIP_USER", "SIP_PASSWORD", "SIP_DISPLAY",
 		"LOCAL_IP", "RTP_PORT_MIN", "RTP_PORT_MAX", "BACKEND", "RESUME_TIMEOUT_SEC",
 		"LOG_LEVEL", "STATE_FILE", "PUSH_STATE_FILE",
-		"FCM_PROJECT_ID", "FCM_SERVICE_ACCOUNT_FILE",
+		"FCM_PROJECT_ID", "FCM_SERVICE_ACCOUNT_FILE", "WS_PING_INTERVAL",
 	} {
 		if err := os.Unsetenv(k); err != nil {
 			t.Fatalf("Unsetenv %s 失敗: %v", k, err)
@@ -51,6 +52,9 @@ func TestDefaults(t *testing.T) {
 	}
 	if c.ResumeTimeoutSec != 30 {
 		t.Errorf("ResumeTimeoutSec 既定 = %d", c.ResumeTimeoutSec)
+	}
+	if c.WSPingInterval != 20*time.Second {
+		t.Errorf("WSPingInterval 既定 = %s", c.WSPingInterval)
 	}
 	if c.Backend != "fake" || c.LogLevel != "info" {
 		t.Errorf("既定が不正: %+v", c)
@@ -83,6 +87,10 @@ func TestValidation(t *testing.T) {
 		{"RESUME_TIMEOUT_SEC 正常", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RESUME_TIMEOUT_SEC": "45"}, true},
 		{"RESUME_TIMEOUT_SEC 0 は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RESUME_TIMEOUT_SEC": "0"}, false},
 		{"RESUME_TIMEOUT_SEC 上限超は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "RESUME_TIMEOUT_SEC": "301"}, false},
+		{"WS_PING_INTERVAL 45s", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "WS_PING_INTERVAL": "45s"}, true},
+		{"WS_PING_INTERVAL 整数秒", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "WS_PING_INTERVAL": "60"}, true},
+		{"WS_PING_INTERVAL 短すぎ", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "WS_PING_INTERVAL": "1s"}, false},
+		{"WS_PING_INTERVAL 不正", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "WS_PING_INTERVAL": "abc"}, false},
 		{"不明な loglevel は不可", map[string]string{"AUTH_MODE": "token", "DEV_TOKEN": "x", "LOG_LEVEL": "verbose"}, false},
 	}
 	for _, tc := range cases {
@@ -167,5 +175,19 @@ func TestSIPHostPrecedence(t *testing.T) {
 	}
 	if c.SIPHost != "192.168.1.1" || c.SIPPort != 5060 {
 		t.Errorf("SIP_HOST/PORT が優先されない: %s:%d", c.SIPHost, c.SIPPort)
+	}
+}
+
+func TestWSPingInterval(t *testing.T) {
+	for in, want := range map[string]time.Duration{"45s": 45 * time.Second, "60": time.Minute, "1m30s": 90 * time.Second} {
+		baseTokenEnv(t)
+		t.Setenv("WS_PING_INTERVAL", in)
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if c.WSPingInterval != want {
+			t.Errorf("%s → %s, want %s", in, c.WSPingInterval, want)
+		}
 	}
 }

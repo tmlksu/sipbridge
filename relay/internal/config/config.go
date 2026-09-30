@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DefaultStateFile は STATE_FILE / PUSH_STATE_FILE 未設定時の既定パスである。
@@ -39,6 +40,10 @@ type Config struct {
 	// ResumeTimeoutSec は通話中に WS が切れてから BYE するまでの猶予 (秒) である。
 	// アプリ側の再接続 (バックオフ + Access/Tunnel のハンドシェイク) が収まる値にする。
 	ResumeTimeoutSec int
+	// WSPingInterval は relay→app の WS ping 周期である (WS_PING_INTERVAL、既定 20s)。
+	// 待機コスト計測 (docs/QUALITY_STATS.md E1) 用に変えられるようにしている。
+	// Cloudflare の WS アイドル切断 (~100 秒) より短くすること。
+	WSPingInterval time.Duration
 	// StateFile はアカウント/端末結び付け/push トークンの永続化先である
 	// (STATE_FILE。旧名 PUSH_STATE_FILE も読む)。
 	StateFile string
@@ -84,6 +89,9 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	if c.ResumeTimeoutSec, err = atoiEnv("RESUME_TIMEOUT_SEC", 30); err != nil {
+		return Config{}, err
+	}
+	if c.WSPingInterval, err = durationEnv("WS_PING_INTERVAL", 20*time.Second); err != nil {
 		return Config{}, err
 	}
 	if err := c.Validate(); err != nil {
@@ -135,6 +143,22 @@ func atoiEnv(key string, def int) (int, error) {
 	return v, nil
 }
 
+// durationEnv は "45s" のような time.ParseDuration 形式、または整数 (秒) を読む。
+func durationEnv(key string, def time.Duration) (time.Duration, error) {
+	s, ok := os.LookupEnv(key)
+	if !ok || s == "" {
+		return def, nil
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%s の値 %q は時間 (例 45s) ではない: %w", key, s, err)
+	}
+	return d, nil
+}
+
 // Validate は設定の整合性を検査する。
 func (c Config) Validate() error {
 	if c.Listen == "" {
@@ -169,6 +193,9 @@ func (c Config) Validate() error {
 	}
 	if c.ResumeTimeoutSec < 1 || c.ResumeTimeoutSec > 300 {
 		return fmt.Errorf("RESUME_TIMEOUT_SEC は 1..300 の範囲 (現在 %d)", c.ResumeTimeoutSec)
+	}
+	if c.WSPingInterval < 5*time.Second || c.WSPingInterval > 5*time.Minute {
+		return fmt.Errorf("WS_PING_INTERVAL は 5s..5m の範囲 (現在 %s)", c.WSPingInterval)
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":

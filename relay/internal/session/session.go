@@ -64,6 +64,9 @@ type Config struct {
 	// LivenessProbeTimeout は push 判定前の生存確認 ping の待ち上限。
 	// 0 なら DefaultLivenessProbeTimeout (3 秒)。
 	LivenessProbeTimeout time.Duration
+	// CallStatsWait は通話終了からアプリの call_stats を待つ上限。これを過ぎたら
+	// relay 側の計測だけでログを出す。0 なら DefaultCallStatsWait (5 秒)。
+	CallStatsWait time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -76,6 +79,9 @@ func (c Config) withDefaults() Config {
 	if c.LivenessProbeTimeout <= 0 {
 		c.LivenessProbeTimeout = DefaultLivenessProbeTimeout
 	}
+	if c.CallStatsWait <= 0 {
+		c.CallStatsWait = DefaultCallStatsWait
+	}
 	return c
 }
 
@@ -86,6 +92,7 @@ type Hub struct {
 	store   *state.Store
 	cfg     Config
 	log     *slog.Logger
+	stats   *callStatsLog // 通話品質ログ (葉のロックのみ)
 
 	mu     sync.Mutex
 	ctx    context.Context               // Run で受け取った親 ctx (group の親)
@@ -102,9 +109,11 @@ func NewHub(factory BackendFactory, pusher push.Pusher, store *state.Store, cfg 
 	if store == nil {
 		store, _ = state.New("")
 	}
+	cfg = cfg.withDefaults()
 	return &Hub{
 		factory: factory, pusher: pusher, store: store,
-		cfg: cfg.withDefaults(), log: log,
+		cfg: cfg, log: log,
+		stats:  newCallStatsLog(log, cfg.CallStatsWait),
 		groups: make(map[string]*group),
 		conns:  make(map[string]map[*Conn]struct{}),
 	}
@@ -490,7 +499,7 @@ func (h *Hub) addConn(c *Conn) {
 	h.seq++
 	c.seq = h.seq
 	set[c] = struct{}{}
-	c.grp = g
+	c.grp.Store(g)
 	if g != nil {
 		g.attach(c)
 	}
@@ -521,8 +530,7 @@ func (h *Hub) removeConn(c *Conn) {
 			delete(h.conns, c.deviceID)
 		}
 	}
-	g := c.grp
-	c.grp = nil
+	g := c.grp.Swap(nil)
 	if g != nil {
 		g.detach(c)
 	}
@@ -533,7 +541,7 @@ func (h *Hub) removeConn(c *Conn) {
 // moveConn は接続を別グループ (nil = account 無し) へ付け替える。
 func (h *Hub) moveConn(c *Conn, g *group) {
 	h.mu.Lock()
-	old := c.grp
+	old := c.grp.Load()
 	if old == g {
 		h.mu.Unlock()
 		return
@@ -541,7 +549,7 @@ func (h *Hub) moveConn(c *Conn, g *group) {
 	if old != nil {
 		old.detach(c)
 	}
-	c.grp = g
+	c.grp.Store(g)
 	if g != nil {
 		g.attach(c)
 	}
@@ -619,8 +627,9 @@ type Conn struct {
 	// addConn で hub.mu の保護下で一度だけ書き、それ以後は不変。
 	seq uint64
 
-	// grp は所属グループ。hub.mu で保護する。
-	grp *group
+	// grp は所属グループ。書き換え (と attach/detach との整合) は hub.mu 保持下で
+	// 行い、読み出しはロック無しでよい (RTP ホットパスで hub.mu を取らないため)。
+	grp atomic.Pointer[group]
 
 	writeMu sync.Mutex
 
@@ -654,31 +663,30 @@ func (c *Conn) writeLoop(ctx context.Context) {
 
 // enqueue は送信キューに積む。キューが満ならメディアは捨て、
 // 制御メッセージなら接続を畳む (古い状態を持ったまま繋げるより、
-// 再接続させて hello で同期させる方が安全)。
-func (c *Conn) enqueue(typ websocket.MessageType, data []byte) {
+// 再接続させて hello で同期させる方が安全)。積めたら true を返す。
+func (c *Conn) enqueue(typ websocket.MessageType, data []byte) bool {
 	select {
 	case c.out <- outFrame{typ: typ, data: data}:
-		return
+		return true
 	default:
 	}
 	if typ == websocket.MessageBinary {
 		if n := c.mediaDropped.Add(1); n%100 == 1 {
 			c.hub.log.Warn("送信キュー満のため RTP を破棄", "device", c.deviceID, "dropped", n)
 		}
-		return
+		return false
 	}
 	c.hub.log.Warn("送信キュー滞留のため切断", "device", c.deviceID)
 	// Close は close ハンドシェイク (書き込み中の writeRaw の完了待ち + 相手の応答待ち) で
 	// 最大十数秒ブロックする。ここは配信側 (イベント/メディアポンプ) から呼ばれるので、
 	// 同期で待つと詰まった 1 台が再び全体を止める。別 goroutine で閉じる (多重呼び出しは安全)。
 	go func() { _ = c.ws.Close(websocket.StatusPolicyViolation, "send queue overflow") }()
+	return false
 }
 
 // group は所属グループを返す (account 無しなら nil)。
 func (c *Conn) group() *group {
-	c.hub.mu.Lock()
-	defer c.hub.mu.Unlock()
-	return c.grp
+	return c.grp.Load()
 }
 
 func (c *Conn) writeRaw(ctx context.Context, typ websocket.MessageType, data []byte) error {
@@ -737,7 +745,8 @@ func (c *Conn) writeHello() error {
 	})
 }
 
-// pingLoop は 20 秒周期で WS ping を送り、無応答なら接続を切る。
+// pingLoop は PingInterval (既定 20 秒、WS_PING_INTERVAL) 周期で WS ping を送り、
+// 無応答なら接続を切る。
 func (c *Conn) pingLoop(ctx context.Context) {
 	t := time.NewTicker(c.hub.cfg.PingInterval)
 	defer t.Stop()
@@ -775,14 +784,20 @@ func (c *Conn) readLoop(ctx context.Context) {
 }
 
 func (c *Conn) handleBinary(data []byte) {
+	// RTP ホットパス (50pps/通話) なのでロックを取らず、group が公開する
+	// 不変スナップショット (route) だけを見る。
 	g := c.group()
 	if g == nil {
 		return // account 無しのメディアは捨てる
 	}
-	if g.winner() != c.deviceID {
-		return // 勝者以外のメディアは捨てる
+	r := g.route.Load()
+	if r == nil || r.winner != c.deviceID {
+		return // 勝者不在・勝者以外のメディアは捨てる
 	}
-	pipe := g.manager().Pipe()
+	if st := r.stats; st != nil {
+		st.up.Observe(data) // atomic のみ (ロック・アロケーション無し)
+	}
+	pipe := r.pipe
 	if pipe == nil {
 		return
 	}
@@ -868,6 +883,13 @@ func (c *Conn) handleText(data []byte) {
 		}
 	case *proto.Ping:
 		_ = c.sendJSON(&proto.Pong{T: proto.TPong, Ts: m.Ts})
+	case *proto.CallStats:
+		// v1.2: ログに出すだけで応答しない (不明な callId でもエラーにしない)。
+		account := ""
+		if g := c.group(); g != nil {
+			account = g.account
+		}
+		c.hub.stats.deliver(account, c.deviceID, m)
 	default:
 		c.sendError("bad_message", fmt.Sprintf("relay は種別 %T を受け付けない", msg))
 	}
