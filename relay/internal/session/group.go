@@ -30,6 +30,19 @@ type group struct {
 	mgr      *call.Manager
 	cancel   context.CancelFunc // Backend/Manager の停止
 	stopped  bool
+	// prov は現在の資格情報が「仮」(sip_account で送られ、まだ REGISTER に
+	// 一度も成功していない) かどうかである。仮のまま SIP サーバに認証で
+	// 拒否され続けたら (maxProvisionalAuthFailures 回以上かつ最初の拒否から
+	// ProvisionalGrace 以上)、新規 account は削除し、パスワード変更は元に戻す
+	// (onRegistration → Hub.abandonProvisional)。誤パスワードで REGISTER を
+	// 打ち続けて account 枠を占拠したり、SIP サーバの fail2ban に relay 自身を
+	// ban させたりしない。
+	prov      provisional
+	provFails int       // prov 中の認証拒否 (401/403/407) の回数
+	provSince time.Time // prov 中の最初の認証拒否の時刻
+	// abandoning は取り消しを Hub に依頼済み (abandonProvisional の実行待ち) である。
+	// prov はこの間も保持し、クリアは abandonProvisional が Manager の一致を確かめてから行う。
+	abandoning bool
 
 	devs         map[string]map[*Conn]struct{} // deviceID → 接続集合
 	winnerDevice string                        // アクティブ通話の勝者デバイス
@@ -90,10 +103,46 @@ func newGroup(h *Hub, account string) *group {
 	}
 }
 
+// provisionalMode は仮の資格情報の由来である。
+type provisionalMode int
+
+const (
+	provNone           provisionalMode = iota // 検証済み (状態ファイル・既定アカウント・REGISTER 成功済み)
+	provNewAccount                            // sip_account で新規作成した account
+	provPasswordChange                        // 結び付いた端末からのパスワード変更
+)
+
+// maxProvisionalAuthFailures は仮の資格情報を取り消すのに必要な認証拒否の回数である。
+// 回数に加えて、最初の拒否から Config.ProvisionalGrace (既定 2 分) 以上続いていること
+// を条件にする。sipbackend の再 REGISTER は 5s, 10s, 20s, 40s, 60s… のバックオフなので、
+// 既定では最初の拒否から約 2 分 15 秒後の拒否で取り消す。その間に一度でも成功すれば
+// 検証済みになる (新規内線の追加・パスワード変更を Asterisk 側で後から行う猶予)。
+const maxProvisionalAuthFailures = 3
+
+// provisional は仮の資格情報の扱いである。
+type provisional struct {
+	mode provisionalMode
+	// prevPassword/prevDisplay は provPasswordChange で諦めたときの戻し先。
+	prevPassword string
+	prevDisplay  string
+}
+
+// provisionalForChange は結び付いた端末からのパスワード変更に使う provisional を返す。
+// まだ一度も成功していない資格情報からの変更なら、元の扱い (新規 / 戻し先) を引き継ぐ
+// (取り消し待ち (abandoning) の間も prov は残っているので同じく引き継ぐ)。
+func (g *group) provisionalForChange() provisional {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.prov.mode != provNone {
+		return g.prov
+	}
+	return provisional{mode: provPasswordChange, prevPassword: g.password, prevDisplay: g.display}
+}
+
 // startBackend は Backend と Manager を (再) 生成して起動する。
 // 既存のものがあれば context キャンセルで停止する (sipbackend は
-// 停止時に REGISTER Expires:0 を送る)。
-func (g *group) startBackend(password, display string) error {
+// 停止時に REGISTER Expires:0 を送る)。prov は資格情報が仮かどうか。
+func (g *group) startBackend(password, display string, prov provisional) error {
 	be, err := g.hub.factory(g.account, password, display)
 	if err != nil {
 		return err
@@ -114,6 +163,10 @@ func (g *group) startBackend(password, display string) error {
 	g.mgr = mgr
 	g.password = password
 	g.display = display
+	g.prov = prov // イベントポンプの開始前に設定する (最初の EvRegistered に間に合わせる)
+	g.provFails = 0
+	g.provSince = time.Time{}
+	g.abandoning = false // 旧 Manager 宛ての取り消しは abandonProvisional が Manager 不一致で捨てる
 	oldWinner := g.winnerDevice
 	g.winnerDevice = ""
 	g.dialerDevice = ""
@@ -321,10 +374,86 @@ func (g *group) eventPump(ctx context.Context, mgr *call.Manager) {
 	}
 }
 
+// onRegistration は仮の資格情報の REGISTER 結果を見る。成功で検証済みにし、
+// 認証拒否が maxProvisionalAuthFailures 回以上かつ最初の拒否から ProvisionalGrace
+// 以上続いたら Hub に取り消しを頼む (タイムアウト等の到達性の問題は数えない)。
+// prov はここではクリアしない (abandoning だけ立てる)。依頼から実行までの間に
+// 結び付いた端末のパスワード変更が来ても、元の扱い (新規 / 戻し先) を引き継げるように。
+func (g *group) onRegistration(mgr *call.Manager, e call.EvRegistered) {
+	g.mu.Lock()
+	if g.stopped || g.mgr != mgr || g.prov.mode == provNone || g.abandoning {
+		g.mu.Unlock()
+		return
+	}
+	if e.OK {
+		g.prov = provisional{}
+		g.provFails = 0
+		g.provSince = time.Time{}
+		g.mu.Unlock()
+		g.log.Info("sip_account の資格情報で REGISTER に成功")
+		return
+	}
+	if !e.AuthRejected() {
+		g.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	if g.provFails == 0 {
+		g.provSince = now
+	}
+	g.provFails++
+	if g.provFails < maxProvisionalAuthFailures || now.Sub(g.provSince) < g.hub.cfg.ProvisionalGrace {
+		g.mu.Unlock()
+		return
+	}
+	g.abandoning = true
+	fails, since := g.provFails, now.Sub(g.provSince)
+	g.mu.Unlock()
+	// hub.bindMu / hub.mu を取るのでイベントポンプの外で行う。
+	go g.hub.abandonProvisional(g, mgr, fails, since, e.Detail)
+}
+
+// takeAbandon は取り消しの実行権を得る。mgr が現在の Manager で取り消し待ちなら
+// prov を返してクリアする (以後この資格情報は仮でない)。そうでなければ false。
+func (g *group) takeAbandon(mgr *call.Manager) (provisional, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped || g.mgr != mgr || !g.abandoning || g.prov.mode == provNone {
+		return provisional{}, false
+	}
+	prov := g.prov
+	g.prov = provisional{}
+	g.provFails = 0
+	g.provSince = time.Time{}
+	g.abandoning = false
+	return prov, true
+}
+
+// isStopped はグループが停止済みかを返す。
+func (g *group) isStopped() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.stopped
+}
+
+// connList は所属接続の一覧である。
+func (g *group) connList() []*Conn {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []*Conn
+	for _, set := range g.devs {
+		for c := range set {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (g *group) dispatch(ctx context.Context, mgr *call.Manager, ev call.Event) {
 	switch e := ev.(type) {
 	case call.EvRegistered:
 		g.broadcast(&proto.Registration{T: proto.TRegistration, OK: e.OK, Detail: e.Detail})
+		g.onRegistration(mgr, e)
 	case call.EvIncoming:
 		g.broadcast(&proto.Incoming{
 			T: proto.TIncoming, CallID: e.CallID,

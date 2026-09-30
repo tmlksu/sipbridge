@@ -15,11 +15,29 @@ const DefaultStateFile = "/var/lib/sipbridge/state.json"
 
 // Config は relay 全体の設定を保持する。
 type Config struct {
-	Listen       string // 例 "127.0.0.1:8080"
-	AuthMode     string // "cf-access" | "token"
-	CFTeamDomain string // 例 "example.cloudflareaccess.com"
+	Listen   string // 例 "127.0.0.1:8080"
+	AuthMode string // "cf-access" | "token"
+	// CFTeamDomain は正規化済み (スキーム・末尾 / 無し、小文字) のチームドメイン
+	// (例 "example.cloudflareaccess.com")。JWKS 取得先と JWT の iss に使う。
+	CFTeamDomain string
 	CFAccessAUD  string // Access アプリケーションの AUD タグ
 	DevToken     string // AUTH_MODE=token 時の共有トークン
+	// AllowInsecureListen は AUTH_MODE=token で LISTEN を loopback 以外に
+	// 開くことを明示的に許す (ALLOW_INSECURE_LISTEN=1)。審査用 relay 等で
+	// 前段に別の TLS 終端がある場合だけ使う。
+	AllowInsecureListen bool
+	// DeviceBinding は X-Device-Id と認証主体 (principal) の TOFU 結び付けの
+	// 扱いである (DEVICE_BINDING=off|warn|enforce、既定 warn)。
+	DeviceBinding string
+	// MaxAccounts は同時に扱う SIP アカウント数の上限 (MAX_ACCOUNTS、既定 16)。
+	// 新規作成時のみ適用し、状態ファイルからの起動時読み込みは超過でも読む。
+	MaxAccounts int
+	// MaxStoredDevices は状態ファイルに保存する端末数の上限
+	// (MAX_STORED_DEVICES、既定 64)。新規保存時のみ適用する。
+	MaxStoredDevices int
+	// MaxOnlineDevices は同時に WS 接続できる端末 (deviceID) 数の上限
+	// (MAX_ONLINE_DEVICES、既定 32)。接続中・保存済みの端末は数えても拒否しない。
+	MaxOnlineDevices int
 	// SIPHost/SIPPort は REGISTER/INVITE の宛先となる SIP サーバである
 	// (SIP_HOST/SIP_PORT。旧名 ASTERISK_HOST/ASTERISK_PORT も読む)。
 	// Asterisk に限らず、任意の SIP レジストラを指定できる
@@ -50,6 +68,11 @@ type Config struct {
 	// FCM 設定 (push 送信用。どちらか空なら push は no-op)
 	FCMProjectID          string
 	FCMServiceAccountFile string
+
+	// SIPTrustedSources は SIP_HOST 以外に SIP 要求・RTP を受け入れる送信元
+	// (CIDR/IP のカンマ区切り、SIP_TRUSTED_SOURCES、既定は空)。解析と検証は
+	// main で sipbackend.ParseTrustedSources により起動時に行う。
+	SIPTrustedSources string
 }
 
 func getenv(key, def string) string {
@@ -64,7 +87,7 @@ func FromEnv() (Config, error) {
 	c := Config{
 		Listen:                getenv("LISTEN", "127.0.0.1:8080"),
 		AuthMode:              getenv("AUTH_MODE", "token"),
-		CFTeamDomain:          getenv("CF_TEAM_DOMAIN", ""),
+		CFTeamDomain:          NormalizeTeamDomain(getenv("CF_TEAM_DOMAIN", "")),
 		CFAccessAUD:           getenv("CF_ACCESS_AUD", ""),
 		DevToken:              getenv("DEV_TOKEN", ""),
 		SIPHost:               sipHost(),
@@ -77,8 +100,22 @@ func FromEnv() (Config, error) {
 		StateFile:             stateFile(),
 		FCMProjectID:          getenv("FCM_PROJECT_ID", ""),
 		FCMServiceAccountFile: getenv("FCM_SERVICE_ACCOUNT_FILE", ""),
+		DeviceBinding:         strings.ToLower(getenv("DEVICE_BINDING", "warn")),
+		SIPTrustedSources:     getenv("SIP_TRUSTED_SOURCES", ""),
 	}
 	var err error
+	if c.AllowInsecureListen, err = boolEnv("ALLOW_INSECURE_LISTEN"); err != nil {
+		return Config{}, err
+	}
+	if c.MaxAccounts, err = atoiEnv("MAX_ACCOUNTS", 16); err != nil {
+		return Config{}, err
+	}
+	if c.MaxStoredDevices, err = atoiEnv("MAX_STORED_DEVICES", 64); err != nil {
+		return Config{}, err
+	}
+	if c.MaxOnlineDevices, err = atoiEnv("MAX_ONLINE_DEVICES", 32); err != nil {
+		return Config{}, err
+	}
 	if c.SIPPort, err = sipPort(); err != nil {
 		return Config{}, err
 	}
@@ -98,6 +135,69 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// NormalizeTeamDomain は CF_TEAM_DOMAIN を正規化する: 前後の空白、
+// "https://" / "http://" と末尾の "/" を除き、小文字にする。
+// 例 "https://Example.CloudflareAccess.com/" → "example.cloudflareaccess.com"。
+func NormalizeTeamDomain(s string) string {
+	s = strings.TrimSpace(s)
+	lower := strings.ToLower(s)
+	for _, p := range []string{"https://", "http://"} {
+		if strings.HasPrefix(lower, p) {
+			s = s[len(p):]
+			break
+		}
+	}
+	s = strings.TrimRight(s, "/")
+	return strings.ToLower(s)
+}
+
+// boolEnv は 1/true/yes/on を true、空/0/false/no/off を false として読む。
+func boolEnv(key string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "", "0", "false", "no", "off":
+		return false, nil
+	case "1", "true", "yes", "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s の値 %q は 1|0 のいずれか", key, os.Getenv(key))
+	}
+}
+
+// IsLoopbackListen は LISTEN のホスト部が loopback (127.0.0.0/8, ::1, localhost)
+// かを返す。ホスト部が空 (":8080") やワイルドカードは全インタフェースなので false。
+func IsLoopbackListen(listen string) (bool, error) {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false, fmt.Errorf("LISTEN %q の解析失敗: %w", listen, err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true, nil
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback(), nil
+}
+
+// Warnings は起動を止めるほどではないが運用上危険な設定の警告を返す。
+func (c Config) Warnings() []string {
+	var w []string
+	if c.AuthMode == "cf-access" && c.SIPUser != "" {
+		w = append(w, "既定アカウント (SIP_USER) が設定されている: 漏洩した Access Service Token だけで "+
+			"sip_account 無しに既定内線 "+c.SIPUser+" で発信できる。端末ごとに sip_account で設定し SIP_USER は空にすることを推奨 (docs/SECURITY.md)")
+	}
+	if c.AuthMode == "token" && c.AllowInsecureListen {
+		if ok, err := IsLoopbackListen(c.Listen); err == nil && !ok {
+			w = append(w, "ALLOW_INSECURE_LISTEN=1: 共有トークン認証のまま "+c.Listen+" で待ち受ける。前段で TLS 終端すること")
+		}
+	}
+	if c.AuthMode == "token" && c.DeviceBinding == "enforce" {
+		w = append(w, "DEVICE_BINDING=enforce: AUTH_MODE=token には認証主体 (principal) が無いので端末 ID の結び付けは検査されない")
+	}
+	if c.AuthMode == "cf-access" && c.DeviceBinding == "off" {
+		w = append(w, "DEVICE_BINDING=off: 端末 ID と Access の認証主体の結び付けを検査しない")
+	}
+	return w
 }
 
 // stateFile は STATE_FILE を優先し、無ければ旧 PUSH_STATE_FILE、
@@ -164,14 +264,27 @@ func (c Config) Validate() error {
 	if c.Listen == "" {
 		return fmt.Errorf("LISTEN が空")
 	}
+	loopback, err := IsLoopbackListen(c.Listen)
+	if err != nil {
+		return err
+	}
 	switch c.AuthMode {
 	case "token":
 		if c.DevToken == "" {
 			return fmt.Errorf("AUTH_MODE=token のとき DEV_TOKEN が必須")
 		}
+		// 共有トークンは平文 HTTP で流れるうえ端末を区別できない。LAN に
+		// 開くと同一 LAN の誰でも盗聴・総当たりできるため既定では拒否する。
+		if !loopback && !c.AllowInsecureListen {
+			return fmt.Errorf("AUTH_MODE=token では LISTEN を loopback (127.0.0.1 / ::1 / localhost) に限る (現在 %q)。"+
+				"前段で TLS 終端する等で意図的に開くなら ALLOW_INSECURE_LISTEN=1", c.Listen)
+		}
 	case "cf-access":
 		if c.CFTeamDomain == "" {
 			return fmt.Errorf("AUTH_MODE=cf-access のとき CF_TEAM_DOMAIN が必須")
+		}
+		if strings.ContainsAny(c.CFTeamDomain, "/:@?# ") {
+			return fmt.Errorf("CF_TEAM_DOMAIN はホスト名のみ (例 example.cloudflareaccess.com、現在 %q)", c.CFTeamDomain)
 		}
 		if c.CFAccessAUD == "" {
 			return fmt.Errorf("AUTH_MODE=cf-access のとき CF_ACCESS_AUD が必須")
@@ -201,6 +314,15 @@ func (c Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("LOG_LEVEL は debug|info|warn|error のいずれか (現在 %q)", c.LogLevel)
+	}
+	switch c.DeviceBinding {
+	case "off", "warn", "enforce":
+	default:
+		return fmt.Errorf("DEVICE_BINDING は off|warn|enforce のいずれか (現在 %q)", c.DeviceBinding)
+	}
+	if c.MaxAccounts < 1 || c.MaxStoredDevices < 1 || c.MaxOnlineDevices < 1 {
+		return fmt.Errorf("MAX_ACCOUNTS / MAX_STORED_DEVICES / MAX_ONLINE_DEVICES は 1 以上 (現在 %d / %d / %d)",
+			c.MaxAccounts, c.MaxStoredDevices, c.MaxOnlineDevices)
 	}
 	return nil
 }

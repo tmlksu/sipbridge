@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +54,10 @@ type Config struct {
 	LocalIP    string // SDP/Contact に載せる自 IP。空なら自動検出
 	RTPPortMin int
 	RTPPortMax int
+	// TrustedSources は SIP_HOST 以外に SIP 要求・RTP を受け入れる送信元である
+	// (SIP_TRUSTED_SOURCES。Docker bridge 上の Asterisk 等、SIP_HOST の解決結果と
+	// 実際の送信元が異なる構成の逃げ道)。ParseTrustedSources で作る。
+	TrustedSources []netip.Prefix
 }
 
 // sipCall は追跡中の 1 通話である。
@@ -132,6 +137,9 @@ type Backend struct {
 	regCallID  string
 
 	registered atomic.Bool
+
+	// filter は SIP 要求・RTP の送信元フィルタである (trust.go)。
+	filter *sourceFilter
 }
 
 var _ call.Backend = (*Backend)(nil)
@@ -147,20 +155,32 @@ func New(cfg Config, log *slog.Logger) (*Backend, error) {
 	if cfg.User == "" {
 		return nil, fmt.Errorf("SIP User が空")
 	}
+	// User は From/To/Contact の URI にエスケープされずに載る。
+	if err := ValidateUser(cfg.User); err != nil {
+		return nil, err
+	}
+	cfg.Display = SanitizeDisplay(cfg.Display)
+	cfg.TrustedSources = append([]netip.Prefix(nil), cfg.TrustedSources...)
 	if cfg.RTPPortMin <= 0 || cfg.RTPPortMax <= 0 || cfg.RTPPortMin > cfg.RTPPortMax {
 		return nil, fmt.Errorf("RTP ポート範囲が不正 (%d-%d)", cfg.RTPPortMin, cfg.RTPPortMax)
 	}
 	if log == nil {
 		log = slog.Default()
 	}
+	filter := newSourceFilter(cfg.SIPHost, cfg.TrustedSources, log)
+	filter.setLocalIP(cfg.LocalIP)
 	return &Backend{
 		cfg:        cfg,
 		log:        log,
 		calls:      make(map[string]*sipCall),
 		rtpNext:    cfg.RTPPortMin,
 		emitNotify: make(chan struct{}, 1),
+		filter:     filter,
 	}, nil
 }
+
+// DroppedSIPRequests は送信元フィルタで捨てた SIP 要求の数である。
+func (b *Backend) DroppedSIPRequests() uint64 { return b.filter.Dropped() }
 
 // Registered は直近の REGISTER 成功状態を返す (テスト用)。
 func (b *Backend) Registered() bool { return b.registered.Load() }
@@ -192,7 +212,15 @@ func (b *Backend) Start(ctx context.Context, ev chan<- call.Event) error {
 	}
 	serverPort := sipConn.LocalAddr().(*net.UDPAddr).Port
 
-	ua, err := sipgo.NewUA(sipgo.WithUserAgent("sipbridge-relay"))
+	// 送信元フィルタは transport 層の読み取りフィルタとして掛ける。ServeUDP の
+	// 待受だけでなく、sipgo client が REGISTER 送信に使う別ソケット (Asterisk の
+	// rewrite_contact/force_rport では INVITE がこちらに届く) にも効き、CANCEL/ACK
+	// のようにトランザクション層で処理される要求もハンドラより前で止まる。
+	b.filter.refresh(ctx)
+	ua, err := sipgo.NewUA(
+		sipgo.WithUserAgent("sipbridge-relay"),
+		sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerReadFilter(b.filter.readFilter)),
+	)
 	if err != nil {
 		_ = sipConn.Close()
 		return fmt.Errorf("sipgo UA 作成失敗: %w", err)
@@ -330,12 +358,8 @@ func (b *Backend) buildRegisterReq() *sip.Request {
 	recipient := sip.Uri{Scheme: "sip", Host: b.cfg.SIPHost, Port: b.cfg.SIPPort}
 	req := sip.NewRequest(sip.REGISTER, recipient)
 	req.SetTransport("UDP")
-	display := b.cfg.Display
-	if display == "" {
-		display = b.cfg.User
-	}
 	from := &sip.FromHeader{
-		DisplayName: display,
+		DisplayName: b.displayName(),
 		Address:     sip.Uri{Scheme: "sip", User: b.cfg.User, Host: b.cfg.SIPHost},
 	}
 	from.Params.Add("tag", b.regFromTag)
@@ -356,17 +380,33 @@ func (b *Backend) buildRegisterReq() *sip.Request {
 	return req
 }
 
+// displayName は From の表示名 (quoted-string の中身としてエスケープ済み) である。
+func (b *Backend) displayName() string {
+	display := b.cfg.Display
+	if display == "" {
+		display = b.cfg.User
+	}
+	return quoteDisplay(display)
+}
+
 func (b *Backend) registerLoop() {
 	backoff := registerBackoffMin
+	first := true
 	for {
 		select {
 		case <-b.ctx.Done():
 			return
 		default:
 		}
-		ok, detail := b.doRegister()
+		// SIP_HOST の解決結果は変わりうるため、再 REGISTER ごとに送信元
+		// フィルタを更新する (初回は Start 内で済んでいる)。
+		if !first {
+			b.filter.refresh(b.ctx)
+		}
+		first = false
+		ok, code, detail := b.doRegister()
 		b.registered.Store(ok)
-		b.emit(call.EvRegistered{OK: ok, Detail: detail})
+		b.emit(call.EvRegistered{OK: ok, Detail: detail, Code: code})
 		wait := reRegisterInterval
 		if !ok {
 			wait = backoff
@@ -390,8 +430,9 @@ func (b *Backend) registerLoop() {
 }
 
 // doRegister は 1 回の REGISTER 試行 (digest 再送付き) を行う。
+// 戻り値は成否・最終応答の SIP ステータス (応答が無ければ 0)・詳細。
 // 登録ループ専用ゴルーチンからのみ呼ぶ。
-func (b *Backend) doRegister() (bool, string) {
+func (b *Backend) doRegister() (bool, int, string) {
 	b.regMu.Lock()
 	defer b.regMu.Unlock()
 	ctx, cancel := context.WithTimeout(b.ctx, registerTimeout)
@@ -403,24 +444,27 @@ func (b *Backend) doRegister() (bool, string) {
 	req.RemoveHeader("Proxy-Authorization")
 	tx, err := b.client.TransactionRequest(ctx, req, sipgo.ClientRequestRegisterBuild)
 	if err != nil {
-		return false, fmt.Sprintf("register 送信失敗: %v", err)
+		return false, 0, fmt.Sprintf("register 送信失敗: %v", err)
 	}
 	defer tx.Terminate()
 	res, err := waitFinal(tx, registerTimeout)
 	if err != nil {
-		return false, fmt.Sprintf("register 応答待ち失敗: %v", err)
+		return false, 0, fmt.Sprintf("register 応答待ち失敗: %v", err)
 	}
 	if res.StatusCode == sip.StatusUnauthorized || res.StatusCode == sip.StatusProxyAuthRequired {
 		res2, err := b.registerDigest(ctx, req, res)
 		if err != nil {
-			return false, err.Error()
+			return false, 0, err.Error()
 		}
 		res = res2
 	}
 	if res.StatusCode != sip.StatusOK {
-		return false, fmt.Sprintf("register %d %s", res.StatusCode, res.Reason)
+		return false, int(res.StatusCode), fmt.Sprintf("register %d %s", res.StatusCode, res.Reason)
 	}
-	return true, "registered"
+	// 200 OK を返した送信元を SIP サーバとして学習する (SIP_HOST が別名・
+	// 別アドレスで応答する構成向け)。応答はトランザクション照合済みである。
+	b.filter.learn(res.Source())
+	return true, int(res.StatusCode), "registered"
 }
 
 // unregister は停止時に REGISTER Expires: 0 (登録解除) を 1 回送る。
@@ -585,11 +629,6 @@ func (b *Backend) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
 		return
 	}
-	dlg, err := b.dlgSrv.ReadInvite(req, tx)
-	if err != nil {
-		b.log.Warn("ReadInvite 失敗", "err", err)
-		return
-	}
 	callID := ""
 	if h := req.CallID(); h != nil {
 		callID = h.Value()
@@ -605,11 +644,33 @@ func (b *Backend) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	sc := &sipCall{
 		callID: callID, dir: "in", state: "ringing",
 		from: from, display: display, pt: offer.pt,
-		remote: offer.addr, dlgSrv: dlg,
+		remote:    offer.addr,
 		resolveCh: make(chan incomingResolution, 1),
 	}
+	// b.calls のキーは相手が選んだ Call-ID である。同じ Call-ID のダイアログ外
+	// INVITE (タグ違い) で稼働中の通話エントリを上書きさせない。確認と登録は
+	// 同じロック区間で行う (同時に届いた同 Call-ID の INVITE 対策)。
 	b.mu.Lock()
+	if _, dup := b.calls[callID]; dup {
+		b.mu.Unlock()
+		b.log.Warn("既存の通話と同じ Call-ID の INVITE を拒否", "callID", callID, "src", req.Source())
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 482, "Loop Detected", nil))
+		return
+	}
 	b.calls[callID] = sc
+	b.mu.Unlock()
+	dlg, err := b.dlgSrv.ReadInvite(req, tx)
+	if err != nil {
+		b.log.Warn("ReadInvite 失敗", "err", err)
+		b.mu.Lock()
+		if cur, ok := b.calls[callID]; ok && cur == sc {
+			delete(b.calls, callID)
+		}
+		b.mu.Unlock()
+		return
+	}
+	b.mu.Lock()
+	sc.dlgSrv = dlg
 	b.mu.Unlock()
 
 	// 100/180 即応 (PROTOCOL: relay は既に 180 を返している)。
@@ -703,10 +764,7 @@ func (b *Backend) handleReinvite(req *sip.Request, tx sip.ServerTransaction, dlg
 			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
 			return
 		}
-		sc.remote = off.addr
-		if sc.pipe != nil {
-			sc.pipe.setRemote(off.addr)
-		}
+		updateRemote(sc, off.addr)
 	}
 	local := sc.localSDP
 	b.mu.Unlock()
@@ -742,10 +800,7 @@ func (b *Backend) handleReinviteCli(req *sip.Request, tx sip.ServerTransaction, 
 			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
 			return
 		}
-		sc.remote = off.addr
-		if sc.pipe != nil {
-			sc.pipe.setRemote(off.addr)
-		}
+		updateRemote(sc, off.addr)
 	}
 	local := sc.localSDP
 	b.mu.Unlock()
@@ -849,7 +904,7 @@ func (b *Backend) Answer(callID string, pt int) (call.MediaPipe, error) {
 		b.mu.Unlock()
 		return nil, err
 	}
-	pipe := newRTPPipe(conn, sc.remote, b.log)
+	pipe := newRTPPipe(conn, sc.remote, b.log, b.filter.Allowed)
 	sc.conn = nil // 所有権は pipe に移る
 	sc.pipe = pipe
 	sc.port = port
@@ -953,8 +1008,11 @@ func (b *Backend) Hangup(callID string) error {
 // Dial は発信する。callID を即座に返し、INVITE 送出・応答待ちは
 // 別ゴルーチンで行う。1xx/200/失敗はイベントで通知する。
 func (b *Backend) Dial(to string) (string, error) {
-	if to == "" {
-		return "", fmt.Errorf("発信先が空")
+	// to は Request-URI と To の user 部にエスケープされずに載るため、
+	// ここで検証・正規化する (CR/LF によるヘッダ注入対策)。
+	to, err := normalizeDialTarget(to)
+	if err != nil {
+		return "", err
 	}
 	b.mu.Lock()
 	b.seq++
@@ -967,12 +1025,8 @@ func (b *Backend) Dial(to string) (string, error) {
 	offer := buildOfferSDP(b.localIP, port)
 	req := sip.NewRequest(sip.INVITE, sip.Uri{Scheme: "sip", User: to, Host: b.cfg.SIPHost, Port: b.cfg.SIPPort})
 	req.SetTransport("UDP")
-	display := b.cfg.Display
-	if display == "" {
-		display = b.cfg.User
-	}
 	from := &sip.FromHeader{
-		DisplayName: display,
+		DisplayName: b.displayName(),
 		Address:     sip.Uri{Scheme: "sip", User: b.cfg.User, Host: b.cfg.SIPHost},
 	}
 	from.Params.Add("tag", sip.GenerateTagN(16))
@@ -994,6 +1048,19 @@ func (b *Backend) Dial(to string) (string, error) {
 
 	go b.runOutgoing(callID, req)
 	return callID, nil
+}
+
+// updateRemote は通話中の相手 RTP 宛先を SDP に追従させる (b.mu 保持下で呼ぶ)。
+// c=0.0.0.0 (RFC 2543 流の保留) は宛先を持たないため無視し、前の宛先を保つ。
+// ここで宛先を潰すと送信が 0.0.0.0 宛てになり、受信の送信元照合も効かなくなる。
+func updateRemote(sc *sipCall, addr *net.UDPAddr) {
+	if addr == nil || addr.IP == nil || addr.IP.IsUnspecified() {
+		return
+	}
+	sc.remote = addr
+	if sc.pipe != nil {
+		sc.pipe.setRemote(addr)
+	}
 }
 
 // runOutgoing は発信 INVITE の送出と応答待ちを行う。
@@ -1083,14 +1150,14 @@ func (b *Backend) runOutgoing(callID string, req *sip.Request) {
 		return
 	}
 	cur.dlgCli = sess
-	cur.remote = ans.addr
 	cur.pt = ans.pt
 	cur.state = "active"
 	if cur.pipe == nil {
-		cur.pipe = newRTPPipe(cur.conn, ans.addr, b.log)
+		cur.remote = ans.addr
+		cur.pipe = newRTPPipe(cur.conn, ans.addr, b.log, b.filter.Allowed)
 		cur.conn = nil
 	} else {
-		cur.pipe.setRemote(ans.addr)
+		updateRemote(cur, ans.addr)
 	}
 	pipe := cur.pipe
 	b.mu.Unlock()
@@ -1128,12 +1195,12 @@ func (b *Backend) onProvisional(callID string, res *sip.Response) {
 	case 183: // Session Progress (early media の可能性)
 		if len(res.Body()) > 0 {
 			if off, err := parseOffer(res.Body()); err == nil {
-				sc.remote = off.addr
 				if sc.pipe == nil {
-					sc.pipe = newRTPPipe(sc.conn, off.addr, b.log)
+					sc.remote = off.addr
+					sc.pipe = newRTPPipe(sc.conn, off.addr, b.log, b.filter.Allowed)
 					sc.conn = nil
 				} else {
-					sc.pipe.setRemote(off.addr)
+					updateRemote(sc, off.addr)
 				}
 				pipe := sc.pipe
 				wasSent := sc.sentEarly

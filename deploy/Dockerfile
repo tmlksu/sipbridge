@@ -5,7 +5,9 @@
 # または deploy/ で docker compose build (context: ../relay)。
 # 前提: relay/ に go.mod と cmd/relay/main.go があること (T1 の成果物)。
 
-ARG GO_VERSION=1.27
+# パッチバージョンまで固定する (再現性と供給網リスクのため)。relay/go.mod の
+# go 行 (1.27) 以上であること。更新時はリリースノートを確認してから上げる。
+ARG GO_VERSION=1.27.1
 
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
