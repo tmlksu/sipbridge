@@ -70,6 +70,17 @@ func newFixtureCfg(t *testing.T, pusher push.Pusher, store *state.Store, cfg ses
 // newFixtureLog はログ出力先を差し替えられる版である (call_stats の検証用)。
 func newFixtureLog(t *testing.T, pusher push.Pusher, store *state.Store, cfg session.Config, log *slog.Logger) *fixture {
 	t.Helper()
+	return newFixtureFull(t, pusher, store, cfg, log, nil)
+}
+
+// newFixtureOpts は起動時から登録失敗状態で作る account (unregistered) を指定できる版である。
+func newFixtureOpts(t *testing.T, pusher push.Pusher, store *state.Store, cfg session.Config, unregistered map[string]bool) *fixture {
+	t.Helper()
+	return newFixtureFull(t, pusher, store, cfg, slog.Default(), unregistered)
+}
+
+func newFixtureFull(t *testing.T, pusher push.Pusher, store *state.Store, cfg session.Config, log *slog.Logger, unregistered map[string]bool) *fixture {
+	t.Helper()
 	if store == nil {
 		var err error
 		if store, err = state.New(""); err != nil {
@@ -81,6 +92,9 @@ func newFixtureLog(t *testing.T, pusher push.Pusher, store *state.Store, cfg ses
 		made:         make(map[string]int),
 		unregistered: make(map[string]bool),
 		store:        store,
+	}
+	for k, v := range unregistered {
+		fx.unregistered[k] = v
 	}
 	factory := func(user, password, display string) (call.Backend, error) {
 		fx.mu.Lock()
@@ -100,13 +114,23 @@ func newFixtureLog(t *testing.T, pusher push.Pusher, store *state.Store, cfg ses
 	if cfg.ResumeTimeout == 0 {
 		cfg.ResumeTimeout = 200 * time.Millisecond
 	}
+	if cfg.AuthFailureDelay == 0 {
+		cfg.AuthFailureDelay = time.Millisecond // パスワード誤りの遅延でテストを遅くしない
+	}
 	hub := session.NewHub(factory, pusher, store, cfg, log)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	if err := hub.Run(ctx); err != nil {
 		t.Fatalf("hub.Run 失敗: %v", err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(hub.ServeWS))
+	// 認証済み principal はテスト用ヘッダ X-Test-Principal で注入する
+	// (本番は main の mux が Authenticate の結果を WithPrincipal で載せる)。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := r.Header.Get("X-Test-Principal"); p != "" {
+			r = r.WithContext(session.WithPrincipal(r.Context(), p))
+		}
+		hub.ServeWS(w, r)
+	}))
 	t.Cleanup(srv.Close)
 	fx.hub = hub
 	fx.srv = srv

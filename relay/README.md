@@ -20,10 +20,16 @@ curl localhost:8080/healthz   # {"status":"ok"}
 |---|---|---|
 | `LISTEN` | `127.0.0.1:8080` | 待ち受けアドレス |
 | `AUTH_MODE` | `token` | `cf-access`\|`token` |
-| `CF_TEAM_DOMAIN` | (無) | cf-access 時に必須 (例 `example.cloudflareaccess.com`) |
+| `CF_TEAM_DOMAIN` | (無) | cf-access 時に必須 (例 `example.cloudflareaccess.com`)。`https://`・末尾 `/` は除去、小文字化。JWT の `iss` は `https://<この値>` を要求 |
 | `CF_ACCESS_AUD` | (無) | cf-access 時に必須 (Access の AUD タグ) |
 | `DEV_TOKEN` | (無) | `token` 時に必須 (`Authorization: Bearer`) |
+| `ALLOW_INSECURE_LISTEN` | `0` | `1` で `AUTH_MODE=token` の非 loopback `LISTEN` を許す (既定は起動エラー) |
+| `DEVICE_BINDING` | `warn` | `off`\|`warn`\|`enforce`。端末 ID と Access の認証主体の TOFU 結び付け (docs/SECURITY.md §5) |
+| `MAX_ACCOUNTS` | `16` | SIP アカウント数の上限 (新規作成時のみ) |
+| `MAX_STORED_DEVICES` | `64` | 状態ファイルに保存する端末数の上限 (新規保存時のみ) |
+| `MAX_ONLINE_DEVICES` | `32` | 同時接続の端末数の上限 (接続中・保存済みの端末は対象外) |
 | `SIP_HOST/SIP_PORT` | `127.0.0.1:5060` | sip バックエンドの対向 SIP サーバ。Asterisk に限らず任意のレジストラでよい (例: ひかり電話 HGW の LAN 側 IP)。旧名 `ASTERISK_HOST/ASTERISK_PORT` も読む |
+| `SIP_TRUSTED_SOURCES` | (空) | SIP 要求・RTP を受け付ける追加の送信元 (CIDR / IP のカンマ区切り)。既定では `SIP_HOST` の解決結果と同居時の自ホストのみ受け付ける (docs/SECURITY.md §9) |
 | `SIP_USER/PASSWORD/DISPLAY` | (無) | **任意**の既定アカウント (v1.1)。設定するとアカウント未設定の端末が暫定的に結び付く (永続化しない)。SIP アカウントは通常アプリが `sip_account` で登録する |
 | `LOCAL_IP` | (自動) | T2 の SDP/Contact 用 |
 | `RTP_PORT_MIN/MAX` | `20000/20100` | T2 の RTP 用 |
@@ -86,8 +92,11 @@ hub := session.NewHub(factory, pusher, store, ...)
   REGISTER を開始する (端末が未接続でも登録を維持する)。
 - 結び付いた端末が 0 になったらグループを停止し、state から account を消す
   (既定アカウント `SIP_USER` は常駐)。
-- 登録済みアカウントに別パスワードが来たら `error account_password_mismatch`。
-  未登録なら受理して Backend を作り直す。Backend 生成失敗は `error account_failed`。
+- 保存値と違うパスワードが来たら `error account_password_mismatch`。例外はそのアカウントに
+  結び付いた端末からの未登録中の送信で、パスワード変更として Backend を作り直す。Backend 生成失敗は
+  `error account_failed`。新規アカウントとパスワード変更は REGISTER 成功まで仮で、認証拒否が 3 回以上かつ
+  最初の拒否から 2 分以上続くと削除 / 差し戻しする (`error account_failed`)。試行制限・上限は
+  docs/SECURITY.md §3。
 - アカウント未設定の端末が `answer/reject/hangup/dial` を送ると `error no_account`。
 - 停止時 (グループ停止・プロセス終了) は REGISTER `Expires: 0` を 1 回送る。
 - ロック順序は `hub.mu → group.mu` の一方向のみ。

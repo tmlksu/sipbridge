@@ -47,7 +47,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// 既定アカウントのユーザ名は SIP ヘッダと digest にそのまま載る (#32)。
+	// 不正なら警告で続行せず起動を止める (config は sipbackend に依存させない)。
+	if cfg.SIPUser != "" {
+		if err := sipbackend.ValidateUser(cfg.SIPUser); err != nil {
+			return fmt.Errorf("SIP_USER: %w", err)
+		}
+	}
 	log := newLogger(cfg.LogLevel)
+	slog.SetDefault(log)
+	for _, w := range cfg.Warnings() {
+		log.Warn("設定の警告: " + w)
+	}
 
 	// 状態ファイル (account / 端末結び付け / push トークン)。
 	// 読み込めなくても起動は継続する (警告のみ、メモリのみで動作)。
@@ -68,6 +79,11 @@ func run() error {
 		}
 		log.Info("バックエンド: fake (テスト用)")
 	case "sip":
+		// 設定ミスは account 生成時ではなく起動時に落とす。
+		trusted, err := sipbackend.ParseTrustedSources(cfg.SIPTrustedSources)
+		if err != nil {
+			return err
+		}
 		factory = func(user, password, display string) (call.Backend, error) {
 			return sipbackend.New(sipbackend.Config{
 				SIPHost:    cfg.SIPHost,
@@ -78,9 +94,12 @@ func run() error {
 				LocalIP:    cfg.LocalIP,
 				RTPPortMin: cfg.RTPPortMin,
 				RTPPortMax: cfg.RTPPortMax,
+				// 送信元フィルタの追加許可 (SIP_TRUSTED_SOURCES)。
+				TrustedSources: trusted,
 			}, log)
 		}
-		log.Info("バックエンド: sip", "host", cfg.SIPHost, "port", cfg.SIPPort)
+		log.Info("バックエンド: sip", "host", cfg.SIPHost, "port", cfg.SIPPort,
+			"trustedSources", cfg.SIPTrustedSources)
 	default:
 		return fmt.Errorf("未知の BACKEND %q", cfg.Backend)
 	}
@@ -92,7 +111,7 @@ func run() error {
 		log.Info("認証: 開発用共有トークン")
 	case "cf-access":
 		authn = auth.NewCFAccessAuth(cfg.CFTeamDomain, cfg.CFAccessAUD)
-		log.Info("認証: Cloudflare Access JWT", "team", cfg.CFTeamDomain)
+		log.Info("認証: Cloudflare Access JWT", "team", cfg.CFTeamDomain, "deviceBinding", cfg.DeviceBinding)
 	}
 
 	// push 送信器: FCM 設定があれば FCM、無ければ no-op。
@@ -113,12 +132,17 @@ func run() error {
 	}
 
 	hub := session.NewHub(factory, pusher, store, session.Config{
-		Version:         RelayVersion,
-		DefaultAccount:  cfg.SIPUser,
-		DefaultPassword: cfg.SIPPassword,
-		DefaultDisplay:  cfg.SIPDisplay,
-		ResumeTimeout:   time.Duration(cfg.ResumeTimeoutSec) * time.Second,
-		PingInterval:    cfg.WSPingInterval,
+		Version:          RelayVersion,
+		DefaultAccount:   cfg.SIPUser,
+		DefaultPassword:  cfg.SIPPassword,
+		DefaultDisplay:   sipbackend.SanitizeDisplay(cfg.SIPDisplay),
+		ResumeTimeout:    time.Duration(cfg.ResumeTimeoutSec) * time.Second,
+		PingInterval:     cfg.WSPingInterval,
+		DeviceBinding:    cfg.DeviceBinding,
+		MaxAccounts:      cfg.MaxAccounts,
+		MaxStoredDevices: cfg.MaxStoredDevices,
+		MaxOnlineDevices: cfg.MaxOnlineDevices,
+		RequirePrincipal: cfg.AuthMode == "cf-access",
 	}, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -157,7 +181,11 @@ func run() error {
 }
 
 // buildMux は HTTP ルーティングを組み立てる。/healthz は認証不要、
-// /v1/session は認証必須である。
+// /v1/session は認証必須である。認証で得た principal は context で
+// ServeWS へ渡す (DEVICE_BINDING と接続ログ用)。
+//
+// 接続元 IP (CF-Connecting-IP) は PII なので認証失敗時だけログに出す
+// (principal 不一致時は session 側で出す)。応答本文に失敗理由は載せない。
 func buildMux(authn auth.Authenticator, hub *session.Hub) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -166,12 +194,13 @@ func buildMux(authn auth.Authenticator, hub *session.Hub) *http.ServeMux {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("/v1/session", func(w http.ResponseWriter, r *http.Request) {
-		if err := authn.Authenticate(r); err != nil {
-			slog.Warn("WS 認証失敗", "err", err)
-			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		principal, err := authn.Authenticate(r)
+		if err != nil {
+			slog.Warn("WS 認証失敗", "err", err, "ip", session.ClientIP(r))
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		hub.ServeWS(w, r)
+		hub.ServeWS(w, r.WithContext(session.WithPrincipal(r.Context(), principal)))
 	})
 	return mux
 }

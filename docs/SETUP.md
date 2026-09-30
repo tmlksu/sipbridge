@@ -3,6 +3,7 @@
 relay (変換装置) と cloudflared を Docker で動かし、宅内 Asterisk を
 インターネットに穴を開けずに使うための手順。全体像は `DESIGN.md`、
 relay ⇄ アプリのプロトコルは `docs/PROTOCOL.md` を参照。
+セキュリティモデル (信頼境界・推奨設定・端末紛失時の失効手順) は `docs/SECURITY.md`。
 
 前提
 
@@ -39,19 +40,23 @@ relay ⇄ アプリのプロトコルは `docs/PROTOCOL.md` を参照。
    - アプリからの接続はこのポリシーでのみ許可し、ブラウザログイン用ポリシーは作らない
      (作ると人間用ログイン画面が出てアプリが通れなくなる)。
 3. Access → Service Auth → Service Tokens → Create Service Token。Client ID と
-   Client Secret を控える (Secret は再表示不可)。
+   Client Secret を控える (Secret は再表示不可)。**端末ごとに 1 本ずつ**作る
+   (失効の単位になり、relay の `DEVICE_BINDING` が端末を区別できる。`docs/SECURITY.md` §5, §6)。
 4. アプリケーションの Overview にある **AUD タグ** を控える。
 5. `.env` に記入する (手順 4):
    - `AUTH_MODE=cf-access`
-   - `CF_TEAM_DOMAIN=example.cloudflareaccess.com`
+   - `CF_TEAM_DOMAIN=example.cloudflareaccess.com` (スキーム無し。JWT の `iss` 検証にも使う)
    - `CF_ACCESS_AUD=<AUD タグ>`
    - 端末側 (手順 7) には Client ID / Secret を設定する。
 6. 開発時 (Access を通さない直結確認) のみ `AUTH_MODE=token` + `DEV_TOKEN=<適当な文字列>` を使う。
-   本番では必ず `cf-access` に戻すこと。
+   本番では必ず `cf-access` に戻すこと。`AUTH_MODE=token` は `LISTEN` が loopback
+   (`127.0.0.1` 等) 以外だと起動しない (意図的に開くときだけ `ALLOW_INSECURE_LISTEN=1`)。
 
 relay は `Cf-Access-Jwt-Assertion` を JWKS
-(`https://<CF_TEAM_DOMAIN>/cdn-cgi/access/certs`) で再検証し (`aud`/`exp` 検証)、
-Access を素通りした不正接続は 401 で拒否する。
+(`https://<CF_TEAM_DOMAIN>/cdn-cgi/access/certs`) で再検証し (RS256 署名・`aud`・
+`iss`=`https://<CF_TEAM_DOMAIN>`・`exp` 必須)、Access を素通りした不正接続は 401 で拒否する。
+端末 ID と Service Token (Client ID) の結び付けは `DEVICE_BINDING` (既定 `warn`)。全端末が
+一度接続したら `enforce` にするのを推奨 (手順と解除方法は `docs/SECURITY.md` §5)。
 
 ## 3. Asterisk 側の設定 (relay が使う内線)
 
@@ -114,11 +119,16 @@ qualify_frequency=60
 - **relay の既定アカウント (旧方式・互換用)**: `.env` の `SIP_USER/SIP_PASSWORD`
   に内線を書くと、アカウント未設定の端末はその内線に暫定的に結び付く。
   ここの `password` と `SIP_PASSWORD` は一致させること。
+  **本番では使わないこと**: Service Token が 1 本漏れるだけで SIP パスワード無しに
+  この内線から発信できる (`AUTH_MODE=cf-access` で設定すると起動時に警告ログが出る)。
 
-なお、既に **登録済み (registered)** のアカウントに別パスワードで `sip_account` が
-来た場合、relay は `error {code:"account_password_mismatch"}` を返して拒否する
-(登録済み内線の乗っ取り防止)。Asterisk 側でパスワードを変えると登録が失敗状態に
-なるため、その後に新パスワードを送れば切り替わる。
+なお、保存済みのアカウントに別パスワードで `sip_account` が来た場合、relay は
+`error {code:"account_password_mismatch"}` を返して拒否する (乗っ取り防止)。例外は
+そのアカウントに既に結び付いた端末で、Asterisk 側でパスワードを変えて登録が失敗状態に
+なった後なら、新パスワードを送れば切り替わる。
+
+relay 内線が漏れても国際電話・高額番号へ発信できないよう、relay が使う内線の
+`context` は外線を制限した専用のものにすること (例は `docs/SECURITY.md` §6)。
 
 ## 4. relay + cloudflared の起動
 
@@ -302,6 +312,12 @@ v1.2 以前は applicationId が `net.peyan.sipbridge` だった。**別アプ�
 | `docker compose config` で env_file エラー | compose が古い可能性。v2.24+ を使用 (`docker compose version`) |
 | relay が Asterisk に REGISTER できない | アプリ側の SIP 内線/パスワード (または `.env` の `SIP_USER/SIP_PASSWORD`) と手順 3 の `password` の一致、`.env` の `SIP_HOST/SIP_PORT`、`LOCAL_IP` の要否、Asterisk の `pjsip show contacts` |
 | Access で 403 | Client ID/Secret の転記ミス、ポリシーが Service Auth になっているか、AUD タグとホスト名の一致 |
+| relay が 409 `device_binding_mismatch` (ログに「端末 ID の principal が記録と不一致」、アプリは再接続を繰り返す) | `DEVICE_BINDING=enforce` で、その端末の Service Token を作り直した等。`docs/SECURITY.md` §5 の手順で記録を消す |
+| relay が 401 (ログに「JWT 検証失敗」) | `CF_TEAM_DOMAIN` (iss) と `CF_ACCESS_AUD` がその Access アプリケーションのものか |
+| relay が 503 | 同時接続の端末数が `MAX_ONLINE_DEVICES` に達している |
+| `sip_account` / `register_push` に `rate_limited` / `too_many_*` | 試行制限・上限 (`docs/PROTOCOL.md`)。`too_many_*` は不要な端末/アカウントを状態ファイルから整理するか上限を上げる |
+| アプリに `account_failed` (「SIP サーバが認証を拒否」) | 新しく設定した内線番号/パスワードが Asterisk に拒否され続けたため relay が取り消した。設定を確認して入れ直す (`docs/SECURITY.md` §3.3) |
+| Asterisk でパスワードを変えたら新パスワードが `account_password_mismatch` | その account に結び付いた端末が残っていない。`docs/SECURITY.md` §3.3 の手順で状態ファイルを直す |
 | 着信が鳴らない (PUSH) | 手順 6 のサービスアカウント配置、`FCM_PROJECT_ID`、アプリの `register_push` 到達 (relay ログ) |
 | 音声が片道/無音 | `direct_media=no`、`rtp_symmetric=yes`、`RTP_PORT_MIN/MAX` がホストで空いているか、Asterisk の `rtp.conf` との重複 |
 | WS が頻繁に切れる | 20 秒 ping に対する Cloudflare のアイドル切断は想定内。アプリの指数バックオフ再接続と `hello` での状態同期で復帰する |
