@@ -177,7 +177,7 @@
     <string name="notif_service_push_title">待機中 (PUSH 起床)</string>
     <string name="notif_service_push_text">PUSH 起床待ち／常駐通知 (消去不可)</string>
     <string name="notif_incall_title">通話中</string>
-    <string name="notif_incall_text">通話中 %1$s — タップで戻る</string>
+    <string name="notif_incall_text">タップで通話画面に戻る</string>
     <string name="notif_outgoing_title">呼出中</string>
     <string name="notif_outgoing_text">%1$s を呼び出し中 — タップで戻る</string>
     <string name="notif_incoming_title">着信中・%1$s</string>

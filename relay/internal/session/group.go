@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -34,7 +35,50 @@ type group struct {
 	winnerDevice string                        // アクティブ通話の勝者デバイス
 	dialerDevice string                        // 発信中 (RINGING_OUT) の要求元デバイス
 	resumeTimer  *time.Timer
-	pumping      bool // メディアポンプ起動済み (通話ごとに 1 本)
+	pumpPipe     call.MediaPipe // メディアポンプが読んでいるパイプ (通話ごとに 1 本)
+	curRec       *callRecord    // 進行中の通話の品質計測 (メディア開始で作る)
+
+	// route は RTP ホットパス (上り handleBinary / 下りメディアポンプ) 用の
+	// 勝者・パイプ・勝者の接続集合のスナップショットである。パケットごとに
+	// hub.mu / group.mu / Manager.mu を取らずに済むよう atomic で公開する。
+	// 書き換えは必ず group.mu 保持下の refreshRouteLocked で行い、公開した
+	// mediaRoute は不変 (書き換えず作り直す)。
+	route atomic.Pointer[mediaRoute]
+}
+
+// mediaRoute は RTP 中継先の不変スナップショットである。
+//
+// 勝者・所属接続・パイプのいずれかが変わる箇所 (setWinner/setDialer, attach/detach,
+// startMediaPump, 通話終了, Backend 作り直し, stop) で作り直す。Manager 内部で
+// パイプが閉じられてから EvEnded を配送するまでの短い間は閉じたパイプを
+// 指しうるが、MediaPipe.Send は Close 後にエラーを返すだけなので害は無い
+// (従来も同じ窓でパケットは捨てられていた)。
+type mediaRoute struct {
+	winner  string         // 勝者デバイス (空にはならない。勝者不在なら route 自体が nil)
+	pipe    call.MediaPipe // 上り送信先 (未確保なら nil)
+	targets []*Conn        // 下り配信先 = 勝者デバイスの接続 (読み取り専用)
+	stats   *callRecord    // 品質計測 (メディア開始前は nil。書き込みは atomic のみ)
+}
+
+// refreshRouteLocked は route を現在の状態から作り直す (呼び出し側が mu 保持)。
+// Manager.mu を取るが、Manager は group を呼ばないのでロック順序
+// group.mu → Manager.mu は安全 (detach も同じ順で取る)。
+func (g *group) refreshRouteLocked() {
+	if g.stopped || g.winnerDevice == "" {
+		g.route.Store(nil)
+		return
+	}
+	r := &mediaRoute{winner: g.winnerDevice, stats: g.curRec}
+	if g.mgr != nil {
+		r.pipe = g.mgr.Pipe()
+	}
+	if set := g.devs[g.winnerDevice]; len(set) > 0 {
+		r.targets = make([]*Conn, 0, len(set))
+		for c := range set {
+			r.targets = append(r.targets, c)
+		}
+	}
+	g.route.Store(r)
 }
 
 func newGroup(h *Hub, account string) *group {
@@ -70,14 +114,19 @@ func (g *group) startBackend(password, display string) error {
 	g.mgr = mgr
 	g.password = password
 	g.display = display
+	oldWinner := g.winnerDevice
 	g.winnerDevice = ""
 	g.dialerDevice = ""
-	g.pumping = false
+	g.pumpPipe = nil
+	oldRec := g.curRec
+	g.curRec = nil
 	if g.resumeTimer != nil {
 		g.resumeTimer.Stop()
 		g.resumeTimer = nil
 	}
+	g.refreshRouteLocked()
 	g.mu.Unlock()
+	g.hub.stats.end(oldRec, oldWinner) // 作り直しで打ち切られた通話 (通常は nil)
 	if old != nil {
 		old() // 旧 Backend を停止 (登録解除)
 	}
@@ -99,7 +148,11 @@ func (g *group) stop() {
 		g.resumeTimer.Stop()
 		g.resumeTimer = nil
 	}
+	rec, winner := g.curRec, g.winnerDevice
+	g.curRec = nil
+	g.refreshRouteLocked()
 	g.mu.Unlock()
+	g.hub.stats.end(rec, winner)
 	if cancel != nil {
 		cancel()
 	}
@@ -142,6 +195,7 @@ func (g *group) winner() string {
 func (g *group) setWinner(deviceID string) {
 	g.mu.Lock()
 	g.winnerDevice = deviceID
+	g.refreshRouteLocked()
 	g.mu.Unlock()
 }
 
@@ -150,6 +204,7 @@ func (g *group) setDialer(deviceID string) {
 	g.mu.Lock()
 	g.winnerDevice = deviceID
 	g.dialerDevice = deviceID
+	g.refreshRouteLocked()
 	g.mu.Unlock()
 }
 
@@ -163,6 +218,9 @@ func (g *group) attach(c *Conn) {
 		g.devs[c.deviceID] = set
 	}
 	set[c] = struct{}{}
+	if c.deviceID == g.winnerDevice {
+		g.refreshRouteLocked() // 勝者の再接続・重複接続を下りの配信先に加える
+	}
 }
 
 // detach は接続を外す (呼び出し側が hub.mu を保持)。勝者デバイスが
@@ -175,6 +233,9 @@ func (g *group) detach(c *Conn) {
 		if len(set) == 0 {
 			delete(g.devs, c.deviceID)
 		}
+	}
+	if c.deviceID == g.winnerDevice {
+		g.refreshRouteLocked() // 切断済み接続を下りの配信先から外す
 	}
 	if g.stopped || g.winnerDevice == "" || g.winnerDevice != c.deviceID {
 		return
@@ -273,6 +334,7 @@ func (g *group) dispatch(ctx context.Context, mgr *call.Manager, ev call.Event) 
 	case call.EvRinging:
 		g.broadcast(&proto.Ringing{T: proto.TRinging, CallID: e.CallID, Early: e.Early})
 		if e.Early {
+			g.beginStats(mgr)
 			g.startMediaPump(mgr) // 早期メディア (183)
 		}
 	case call.EvAnswered:
@@ -280,10 +342,18 @@ func (g *group) dispatch(ctx context.Context, mgr *call.Manager, ev call.Event) 
 	case call.EvEnded:
 		g.mu.Lock()
 		g.stopResumeLocked() // 呼が終わったら猶予タイマは不要 (次の呼を切らせない)
+		winner := g.winnerDevice
+		var rec *callRecord
+		if g.curRec != nil && g.curRec.callID == e.CallID {
+			rec = g.curRec
+			g.curRec = nil
+		}
 		g.winnerDevice = ""
 		g.dialerDevice = ""
-		g.pumping = false
+		g.pumpPipe = nil
+		g.refreshRouteLocked()
 		g.mu.Unlock()
+		g.hub.stats.end(rec, winner)
 		g.broadcast(&proto.Ended{
 			T: proto.TEnded, CallID: e.CallID, Reason: e.Reason, Code: e.Code,
 		})
@@ -293,6 +363,7 @@ func (g *group) dispatch(ctx context.Context, mgr *call.Manager, ev call.Event) 
 // onAnswered は answer 確定時の配送である。着信 (direction=in) では勝者以外に
 // ended{reason:answered_elsewhere} を送り、メディアは勝者のみにする。
 func (g *group) onAnswered(mgr *call.Manager, e call.EvAnswered) {
+	g.beginStats(mgr) // answered を送る前 (= アプリが上り RTP を送り始める前) に計測を始める
 	cur := mgr.Current()
 	winner := g.winner()
 	answered := &proto.Answered{T: proto.TAnswered, CallID: e.CallID, PT: e.PT}
@@ -365,27 +436,71 @@ func (g *group) sendToDevice(deviceID string, v any) {
 	writeAll(g.conns(deviceID, ""), websocket.MessageText, data)
 }
 
+// beginStats は通話の品質計測の記録を作り、上りの計測を route に載せる。
+// answered/早期メディアをアプリへ送る前に呼ぶ (アプリが送り始める最初の
+// 上り RTP から数えるため)。
+func (g *group) beginStats(mgr *call.Manager) {
+	pipe := mgr.Pipe()
+	if pipe == nil {
+		return
+	}
+	g.mu.Lock()
+	if g.mgr == mgr {
+		g.beginStatsLocked(mgr, pipe)
+		g.refreshRouteLocked()
+	}
+	g.mu.Unlock()
+}
+
+// beginStatsLocked は呼び出し側が mu 保持。183→200 で同じ呼なら同じ記録に
+// パイプを足す。stats.mu は葉のロックなので group.mu 保持下で取ってよい
+// (Manager.mu も group.mu → Manager.mu の順で安全)。
+func (g *group) beginStatsLocked(mgr *call.Manager, pipe call.MediaPipe) {
+	cur := mgr.Current()
+	if cur == nil {
+		return
+	}
+	g.curRec = g.hub.stats.begin(g.account, cur.CallID, g.winnerDevice, pipe)
+}
+
 // startMediaPump はバックエンド→勝者への RTP 転送を開始する。
+// 同じパイプに対しては 1 本だけ起動する (183 と 200 で二重起動しない)。
+// 200 で早期メディアと別のパイプが渡された場合は新しいパイプ用に起動し直す
+// (古いパイプは Manager が閉じるので古いポンプは自然に終わる)。
 func (g *group) startMediaPump(mgr *call.Manager) {
 	pipe := mgr.Pipe()
 	if pipe == nil {
 		return
 	}
 	g.mu.Lock()
-	if g.pumping {
+	if g.mgr != mgr || g.pumpPipe == pipe {
 		g.mu.Unlock()
-		return // 183 と 200 で二重起動しない
+		return // 作り直された古い Manager / 起動済み
 	}
-	g.pumping = true
+	g.pumpPipe = pipe
+	g.beginStatsLocked(mgr, pipe)
+	g.refreshRouteLocked() // 上りの送信先パイプを確定させる
 	g.mu.Unlock()
 	go func() {
 		for pkt := range pipe.Recv() {
-			// 勝者不在 (resume 猶予中) でもパイプは読み続け、破棄する。
-			w := g.winner()
-			if w == "" {
+			// 勝者不在 (resume 猶予中・通話終了後) でもパイプは読み続け、破棄する。
+			// 配信先はパケットごとに route を読み直すので、勝者の再接続・
+			// 重複接続の置換にも追従する。
+			// 別のパイプ (前の呼の残り・183→200 で差し替えられた早期メディア) の
+			// パケットは今の勝者へ流さない。
+			r := g.route.Load()
+			if r == nil || r.pipe != pipe {
 				continue
 			}
-			writeAll(g.conns(w, ""), websocket.MessageBinary, pkt)
+			var dropped uint64
+			for _, c := range r.targets {
+				if !c.enqueue(websocket.MessageBinary, pkt) {
+					dropped++
+				}
+			}
+			if dropped > 0 && r.stats != nil {
+				r.stats.txDrop.Add(dropped)
+			}
 		}
 	}()
 }

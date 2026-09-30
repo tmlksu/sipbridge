@@ -64,6 +64,12 @@ func newMultiFixture(t *testing.T, store *state.Store) *fixture {
 
 func newFixtureCfg(t *testing.T, pusher push.Pusher, store *state.Store, cfg session.Config) *fixture {
 	t.Helper()
+	return newFixtureLog(t, pusher, store, cfg, slog.Default())
+}
+
+// newFixtureLog はログ出力先を差し替えられる版である (call_stats の検証用)。
+func newFixtureLog(t *testing.T, pusher push.Pusher, store *state.Store, cfg session.Config, log *slog.Logger) *fixture {
+	t.Helper()
 	if store == nil {
 		var err error
 		if store, err = state.New(""); err != nil {
@@ -94,7 +100,7 @@ func newFixtureCfg(t *testing.T, pusher push.Pusher, store *state.Store, cfg ses
 	if cfg.ResumeTimeout == 0 {
 		cfg.ResumeTimeout = 200 * time.Millisecond
 	}
-	hub := session.NewHub(factory, pusher, store, cfg, slog.Default())
+	hub := session.NewHub(factory, pusher, store, cfg, log)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	if err := hub.Run(ctx); err != nil {

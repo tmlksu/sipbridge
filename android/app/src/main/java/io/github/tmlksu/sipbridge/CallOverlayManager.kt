@@ -5,13 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.Chronometer
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -30,11 +30,9 @@ class CallOverlayManager(private val ctx: Context) {
     private var view: LinearLayout? = null
 
     // ---- 通話中ピル ----
-    private var pillView: TextView? = null
+    /** 経過時間は Chronometer 自身がカウントアップする (表示中のみ。自前の 1 秒ティックは持たない)。 */
+    private var pillView: Chronometer? = null
     private var pillParams: WindowManager.LayoutParams? = null
-    private val pillHandler = Handler(Looper.getMainLooper())
-    private var pillStart = 0L
-    private var pillTick: Runnable? = null
 
     fun canDraw(): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(ctx) else true
@@ -87,9 +85,8 @@ class CallOverlayManager(private val ctx: Context) {
         if (!canDraw()) return
         hideInCallPill()
         if (wm == null) wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        pillStart = startedAt
         val density = ctx.resources.displayMetrics.density
-        val tv = TextView(ctx).apply {
+        val tv = Chronometer(ctx).apply {
             // 他アプリの上でも視認できるよう accent 塗り + 太字 (UI-DESIGN §3.2)
             background = ContextCompat.getDrawable(ctx, R.drawable.pill_call)
             setTextColor(ContextCompat.getColor(ctx, R.color.nocturne_text))
@@ -149,32 +146,21 @@ class CallOverlayManager(private val ctx: Context) {
             }
         }
         pillView = tv
-        updatePillText(tv)
-        runCatching { wm?.addView(tv, params) }
-        val tick = object : Runnable {
-            override fun run() {
-                val v = pillView ?: return
-                updatePillText(v)
-                pillHandler.postDelayed(this, 1000)
-            }
-        }
-        pillTick = tick
-        pillHandler.postDelayed(tick, 1000)
-    }
-
-    private fun updatePillText(tv: TextView) {
-        if (pillStart <= 0) {
-            // 発信呼出中 (まだ通話が始まっていない)
+        if (startedAt <= 0) {
+            // 発信呼出中 (まだ通話が始まっていない)。応答後は BridgeService がピルを作り直す。
             tv.text = "📞 ${ctx.getString(R.string.overlay_calling)}"
-            return
+        } else {
+            // epoch ms (CallHub.callStartedAt) → Chronometer の elapsedRealtime 基準へ換算
+            val since = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+            tv.base = SystemClock.elapsedRealtime() - since
+            tv.format = "📞 %s"
+            tv.start()
         }
-        val s = ((System.currentTimeMillis() - pillStart) / 1000).toInt().coerceAtLeast(0)
-        tv.text = "📞 %02d:%02d".format(s / 60, s % 60)
+        runCatching { wm?.addView(tv, params) }
     }
 
     fun hideInCallPill() {
-        pillTick?.let { pillHandler.removeCallbacks(it) }
-        pillTick = null
+        pillView?.stop()
         runCatching { pillView?.let { wm?.removeView(it) } }
         pillView = null
         pillParams = null

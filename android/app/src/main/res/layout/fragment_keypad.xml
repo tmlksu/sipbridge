@@ -46,8 +46,9 @@
             android:textColor="@color/nocturne_text_dim"
             android:textSize="13sp" />
 
-        <!-- アプリ内通話中ピル (§3.2)。通話中のみ表示。タップで通話画面に戻る。 -->
-        <TextView
+        <!-- アプリ内通話中ピル (§3.2)。通話中のみ表示。タップで通話画面に戻る。
+             経過時間は Chronometer 自身が表示中のみカウントアップする (#23)。 -->
+        <Chronometer
             android:id="@+id/tvInCallPill"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -58,7 +59,7 @@
             android:paddingTop="10dp"
             android:paddingEnd="14dp"
             android:paddingBottom="10dp"
-            android:text="📞 00:00"
+            android:format="📞 %s"
             android:textColor="@color/nocturne_text"
             android:textSize="14sp"
             android:textStyle="bold"
