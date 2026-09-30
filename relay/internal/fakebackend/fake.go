@@ -21,6 +21,7 @@ type Fake struct {
 
 	regOK     bool // Start で上げる EvRegistered.OK
 	regDetail string
+	regCode   int
 	// DialAnsweredAfter は Dial 後に EvAnswered を上げるまでの遅延。
 	// 0 なら即時に Ringing→Answered を上げる。
 }
@@ -32,23 +33,33 @@ type fakeCall struct {
 
 // New は Fake を作る (Start で登録成功を上げる)。
 func New() *Fake {
-	return &Fake{calls: make(map[string]*fakeCall), regOK: true, regDetail: "fake: registered"}
+	return &Fake{calls: make(map[string]*fakeCall), regOK: true, regDetail: "fake: registered", regCode: 200}
 }
 
 // NewUnregistered は登録失敗状態の Fake を作る
 // (パスワード変更の受理条件などのテスト用)。
 func NewUnregistered() *Fake {
-	return &Fake{calls: make(map[string]*fakeCall), regOK: false, regDetail: "fake: 401 unauthorized"}
+	return &Fake{calls: make(map[string]*fakeCall), regOK: false, regDetail: "fake: 401 unauthorized", regCode: 401}
+}
+
+// InjectRegistration は REGISTER 結果のイベントを上げる (再 REGISTER の模擬)。
+func (f *Fake) InjectRegistration(ok bool, code int, detail string) {
+	f.mu.Lock()
+	ev := f.ev
+	f.mu.Unlock()
+	if ev != nil {
+		ev <- call.EvRegistered{OK: ok, Detail: detail, Code: code}
+	}
 }
 
 // Start は登録イベントを上げ、ctx 終了まで待つ。
 func (f *Fake) Start(ctx context.Context, ev chan<- call.Event) error {
 	f.mu.Lock()
 	f.ev = ev
-	ok, detail := f.regOK, f.regDetail
+	ok, detail, code := f.regOK, f.regDetail, f.regCode
 	f.mu.Unlock()
 	select {
-	case ev <- call.EvRegistered{OK: ok, Detail: detail}:
+	case ev <- call.EvRegistered{OK: ok, Detail: detail, Code: code}:
 	default:
 	}
 	go func() {

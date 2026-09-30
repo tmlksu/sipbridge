@@ -1,6 +1,6 @@
 # sipbridge
 
-宅内 Asterisk を **ポートを開けず・平文 UDP を待ち受けず・push で着信** できるようにする、
+宅内 Asterisk を **ポートを開けず・端末側で平文 UDP を待ち受けず・push で着信** できるようにする、
 「Asterisk + 変換装置 (relay, Docker) + Android アプリ」構成。
 
 - `DESIGN.md` — 方式検討と採用理由

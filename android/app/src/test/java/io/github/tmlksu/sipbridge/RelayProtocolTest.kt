@@ -2,6 +2,7 @@ package io.github.tmlksu.sipbridge
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -160,7 +161,9 @@ class RelayProtocolTest {
         assertEquals("wss://relay.example.com/v1/session", normalizeRelayUrl("wss://relay.example.com"))
         assertEquals("wss://relay.example.com/v1/session", normalizeRelayUrl("relay.example.com"))
         assertEquals("wss://relay.example.com/v1/session", normalizeRelayUrl("https://relay.example.com/"))
-        assertEquals("ws://192.168.1.10:8080/v1/session", normalizeRelayUrl("http://192.168.1.10:8080"))
+        // 平文はループバック (adb reverse 試験用) のみ
+        assertEquals("ws://127.0.0.1:18080/v1/session", normalizeRelayUrl("http://127.0.0.1:18080", allowLoopbackCleartext = true))
+        assertEquals("ws://localhost:18080/v1/session", normalizeRelayUrl("ws://localhost:18080/", allowLoopbackCleartext = true))
         // パス付きはそのまま
         assertEquals(
             "wss://relay.example.com/v1/session",
@@ -172,6 +175,98 @@ class RelayProtocolTest {
         } catch (e: IllegalArgumentException) {
             // ok
         }
+        // #43: 平文の LAN 宛ては接続先として受け付けない (以前は ws://192.168.1.10:8080/v1/session)
+        try {
+            normalizeRelayUrl("http://192.168.1.10:8080")
+            fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            // ok
+        }
+    }
+
+    @Test
+    fun `checkRelayUrl rejects cleartext to non-loopback hosts`() {
+        assertEquals(RelayUrlCheck.Cleartext("192.168.1.10"), checkRelayUrl("ws://192.168.1.10:8080", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Cleartext("relay.example.com"), checkRelayUrl("http://relay.example.com", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Cleartext("relay.example.com"), checkRelayUrl("WS://Relay.Example.com", allowLoopbackCleartext = true))
+        // 127.0.0.1 以外の 127/8 や 0.0.0.0 はループバック扱いしない
+        assertEquals(RelayUrlCheck.Cleartext("127.0.0.2"), checkRelayUrl("ws://127.0.0.2", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Cleartext("0.0.0.0"), checkRelayUrl("ws://0.0.0.0:18080", allowLoopbackCleartext = true))
+        // userinfo やバックスラッシュでホスト判定をすり抜けさせない (OkHttp と同じ解釈)
+        assertEquals(RelayUrlCheck.Cleartext("evil.example"), checkRelayUrl("ws://127.0.0.1@evil.example", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Cleartext("evil.example"), checkRelayUrl("ws://evil.example\\@127.0.0.1", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Cleartext("localhost.evil.example"), checkRelayUrl("ws://localhost.evil.example", allowLoopbackCleartext = true))
+    }
+
+    @Test
+    fun `checkRelayUrl accepts tls and loopback cleartext`() {
+        assertEquals(RelayUrlCheck.Ok("wss://relay.example.com/v1/session"), checkRelayUrl("relay.example.com", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Ok("wss://relay.example.com/v1/session"), checkRelayUrl("HTTPS://relay.example.com", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Ok("wss://192.168.1.10:8443/v1/session"), checkRelayUrl("wss://192.168.1.10:8443", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Ok("ws://127.0.0.1:18080/v1/session"), checkRelayUrl("ws://127.0.0.1:18080", allowLoopbackCleartext = true))
+        assertEquals(RelayUrlCheck.Ok("ws://LOCALHOST:18080/v1/session"), checkRelayUrl("ws://LOCALHOST:18080", allowLoopbackCleartext = true))
+        // ::1 は debug の network_security_config に無いので許可しない (N1)
+        assertEquals(
+            RelayUrlCheck.Cleartext("::1"),
+            checkRelayUrl("ws://[::1]:18080", allowLoopbackCleartext = true)
+        )
+    }
+
+    @Test
+    fun `release build rejects loopback cleartext too`() {
+        // release (BuildConfig.DEBUG=false) はループバックの ws:// も保存前に弾く (N2)
+        assertEquals(
+            RelayUrlCheck.Cleartext("127.0.0.1", loopbackAllowed = false),
+            checkRelayUrl("ws://127.0.0.1:18080", allowLoopbackCleartext = false)
+        )
+        assertEquals(
+            RelayUrlCheck.Cleartext("localhost", loopbackAllowed = false),
+            checkRelayUrl("http://localhost", allowLoopbackCleartext = false)
+        )
+        assertEquals(
+            RelayUrlCheck.Ok("wss://relay.example.com/v1/session"),
+            checkRelayUrl("relay.example.com", allowLoopbackCleartext = false)
+        )
+        try {
+            normalizeRelayUrl("ws://127.0.0.1:18080", allowLoopbackCleartext = false)
+            fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            // ok
+        }
+    }
+
+    @Test
+    fun `checkRelayUrl reports empty and malformed input`() {
+        assertEquals(RelayUrlCheck.Empty, checkRelayUrl(""))
+        assertEquals(RelayUrlCheck.Empty, checkRelayUrl("   "))
+        assertTrue(checkRelayUrl("ftp://relay.example.com") is RelayUrlCheck.Invalid)
+        assertTrue(checkRelayUrl("wss://") is RelayUrlCheck.Invalid)
+        assertTrue(checkRelayUrl("wss://bad host") is RelayUrlCheck.Invalid)
+    }
+
+    @Test
+    fun `cleartext policy failure is recognized`() {
+        assertTrue(
+            RelayClient.isCleartextBlocked(
+                java.net.UnknownServiceException(
+                    "CLEARTEXT communication to 192.168.1.10 not permitted by network security policy"
+                )
+            )
+        )
+        assertTrue(RelayClient.isCleartextBlocked(java.net.UnknownServiceException("other")))
+        assertFalse(RelayClient.isCleartextBlocked(java.io.IOException("CLEARTEXT")))
+    }
+
+    @Test
+    fun loopbackHosts() {
+        assertTrue(isLoopbackHost("127.0.0.1"))
+        assertTrue(isLoopbackHost("localhost"))
+        assertTrue(isLoopbackHost("LocalHost"))
+        assertFalse(isLoopbackHost("::1"))
+        assertFalse(isLoopbackHost("[::1]"))
+        assertFalse(isLoopbackHost("127.0.0.2"))
+        assertFalse(isLoopbackHost("192.168.1.10"))
+        assertFalse(isLoopbackHost("localhost.example.com"))
     }
 
     @Test

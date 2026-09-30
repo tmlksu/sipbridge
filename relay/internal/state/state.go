@@ -6,7 +6,7 @@
 //	{
 //	  "version": 2,
 //	  "accounts": {"101": {"password": "…", "display": "…"}},
-//	  "devices":  {"<deviceId>": {"account": "101", "push": {"provider":"fcm","token":"…"}}}
+//	  "devices":  {"<deviceId>": {"account": "101", "push": {"provider":"fcm","token":"…"}, "principal": "…"}}
 //	}
 //
 // 旧形式 (`{"<deviceId>": {"provider": "fcm", "token": "…"}}`, T1/T5 の
@@ -18,10 +18,12 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Version は現在の状態ファイル形式のバージョンである。
@@ -43,7 +45,18 @@ type Push struct {
 type Device struct {
 	Account string `json:"account,omitempty"`
 	Push    *Push  `json:"push,omitempty"`
+	// Principal はこの端末 ID を最初に使った認証主体 (Cloudflare Access JWT の
+	// sub、Service Token なら common_name) である (TOFU, DEVICE_BINDING)。
+	// 端末の記録 (account / push) と一緒に消える。
+	Principal string `json:"principal,omitempty"`
+	// Created は端末の記録を作った時刻 (Unix 秒) である。保存数の上限で
+	// account の無い古い端末を追い出す順序に使う (0 = 記録前からある端末)。
+	Created int64 `json:"created,omitempty"`
 }
+
+// ErrTooManyDevices は新しい端末を保存しようとして上限 (SetMaxDevices) を
+// 超えたときに返る。既存端末の更新では返らない。
+var ErrTooManyDevices = errors.New("保存できる端末数の上限に達した")
 
 // fileFormat は状態ファイルの JSON 表現である。
 type fileFormat struct {
@@ -61,6 +74,9 @@ type Store struct {
 	accounts map[string]Account
 	devices  map[string]Device
 	migrated bool // 旧形式から移行した (起動ログ用)
+	// maxDevices は新規に保存できる端末数の上限 (0 = 無制限)。
+	// 起動時の読み込みには適用しない (超過していても全件読む)。
+	maxDevices int
 }
 
 // New は Store を作り、既存ファイルがあれば読み込む (旧形式は移行する)。
@@ -96,6 +112,32 @@ func New(path string) (*Store, error) {
 		}
 	}
 	return s, nil
+}
+
+// SetMaxDevices は新規に保存できる端末数の上限を設定する (0 以下 = 無制限)。
+// 既に保存済みの端末は上限を超えていても消さない。
+func (s *Store) SetMaxDevices(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	s.maxDevices = n
+}
+
+// CanAddDevice は deviceID を (新規または既存として) 保存できるかを返す。
+// 既存端末なら常に true。新規なら上限に空きがあるときだけ true。
+func (s *Store) CanAddDevice(deviceID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.canAddLocked(deviceID)
+}
+
+func (s *Store) canAddLocked(deviceID string) bool {
+	if _, ok := s.devices[deviceID]; ok {
+		return true
+	}
+	return s.maxDevices <= 0 || len(s.devices) < s.maxDevices
 }
 
 // Migrated は旧形式 (push トークンのみ) から移行したかを返す。
@@ -278,6 +320,12 @@ func (s *Store) SetDeviceAccount(deviceID, user string) error {
 	if d.Account == user {
 		return nil
 	}
+	if user != "" && !s.canAddLocked(deviceID) {
+		return ErrTooManyDevices
+	}
+	if _, ok := s.devices[deviceID]; !ok {
+		d.Created = time.Now().Unix()
+	}
 	d.Account = user
 	if d.Account == "" && d.Push == nil {
 		delete(s.devices, deviceID)
@@ -298,10 +346,80 @@ func (s *Store) SetDevicePush(deviceID string, p Push) error {
 	if d.Push != nil && *d.Push == p {
 		return nil
 	}
+	if !s.canAddLocked(deviceID) {
+		return ErrTooManyDevices
+	}
+	if _, ok := s.devices[deviceID]; !ok {
+		d.Created = time.Now().Unix()
+	}
 	cp := p
 	d.Push = &cp
 	s.devices[deviceID] = d
 	return s.saveLocked()
+}
+
+// PinDevicePrincipal は端末の principal を TOFU で記録し、記録済みの値を返す。
+//
+//   - principal が空、または端末の記録 (account / push) が無ければ何もしない ("" を返す)。
+//     接続しただけの端末 (wsprobe の使い捨て ID 等) で状態ファイルを増やさないため、
+//     記録は account の結び付けか push 登録で端末が保存されたときから始める。
+//   - 記録済みならそれを返す (上書きしない。呼び出し側が不一致を判定する)。
+//   - 未記録なら principal を記録して保存し、それを返す。
+//
+// 書き込みは値が変わるときだけ行う (microSD 配慮)。
+func (s *Store) PinDevicePrincipal(deviceID, principal string) (string, error) {
+	if deviceID == "" || principal == "" {
+		return "", nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.devices[deviceID]
+	if !ok {
+		return "", nil
+	}
+	if d.Principal != "" {
+		return d.Principal, nil
+	}
+	d.Principal = principal
+	s.devices[deviceID] = d
+	return principal, s.saveLocked()
+}
+
+// EvictOldestUnbound は account に結び付いていない端末のうち最も古い
+// (Created が小さい、同じなら ID が小さい) 1 台を削除し、その ID を返す。
+// skip が true を返す端末は対象外。対象が無ければ ("", false)。
+func (s *Store) EvictOldestUnbound(skip func(id string) bool) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	victim := s.oldestUnboundLocked(skip)
+	if victim == "" {
+		return "", false
+	}
+	delete(s.devices, victim)
+	_ = s.saveLocked() // 失敗してもメモリ上は削除済み (次の書き込みで反映される)
+	return victim, true
+}
+
+// HasEvictableUnbound は EvictOldestUnbound で追い出せる端末があるかを返す (状態は変えない)。
+func (s *Store) HasEvictableUnbound(skip func(id string) bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.oldestUnboundLocked(skip) != ""
+}
+
+// oldestUnboundLocked は account の無い最も古い端末の ID を返す (無ければ "")。
+func (s *Store) oldestUnboundLocked(skip func(id string) bool) string {
+	victim := ""
+	var victimAt int64
+	for id, d := range s.devices {
+		if d.Account != "" || (skip != nil && skip(id)) {
+			continue
+		}
+		if victim == "" || d.Created < victimAt || (d.Created == victimAt && id < victim) {
+			victim, victimAt = id, d.Created
+		}
+	}
+	return victim
 }
 
 // RemoveDevice は端末の情報をすべて削除する。

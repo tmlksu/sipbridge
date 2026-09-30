@@ -1,5 +1,7 @@
 package io.github.tmlksu.sipbridge
 
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 
 /**
@@ -179,16 +181,100 @@ object RelayProtocol {
 }
 
 /**
- * 設定の relay URL (例 `wss://relay.example.com`, `https://relay.example.com/`, `relay.example.com`)
- * を WebSocket 接続先 (`.../v1/session`) に正規化する。Android 依存なし。
+ * relay URL の検証結果 (#43)。設定画面・adb 設定投入・接続時の全経路で [checkRelayUrl] を通す。
+ * [message] はログ・例外用 (UI の文言は strings.xml 側で種類ごとに出し分ける)。
  */
-fun normalizeRelayUrl(input: String): String {
+sealed class RelayUrlCheck {
+    abstract val message: String
+
+    /** 接続に使える。[url] は正規化済み (`ws(s)://host[:port]/v1/session`)。 */
+    data class Ok(val url: String) : RelayUrlCheck() {
+        override val message: String get() = "ok"
+    }
+
+    object Empty : RelayUrlCheck() {
+        override val message: String get() = "relay URL が空です"
+    }
+
+    /**
+     * 平文 (ws:// / http://) で使えないホスト [host] を指している。
+     * [loopbackAllowed] はこのビルドでループバック宛ての平文を許しているか (debug のみ true)。
+     */
+    data class Cleartext(val host: String, val loopbackAllowed: Boolean = true) : RelayUrlCheck() {
+        override val message: String
+            get() = if (loopbackAllowed) {
+                "平文の ws:// / http:// はループバック (127.0.0.1 / localhost) 以外には" +
+                    "使えません。wss:// を指定してください (host=$host)"
+            } else {
+                "平文の ws:// / http:// は使えません。wss:// を指定してください (host=$host)"
+            }
+    }
+
+    /** URL として解釈できない (未知のスキーム・ホスト無しなど)。 */
+    data class Invalid(val reason: String) : RelayUrlCheck() {
+        override val message: String get() = "relay URL が不正です: $reason"
+    }
+}
+
+/**
+ * 平文接続を許すループバックのホスト名 (debug の adb reverse 試験用)。
+ * debug の network_security_config (127.0.0.1 / localhost) と一致させる。`::1` は含めない。
+ */
+private val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost")
+
+/** [host] がループバック (127.0.0.1 / localhost) か。大文字小文字は区別しない。 */
+fun isLoopbackHost(host: String): Boolean = host.trim().lowercase() in LOOPBACK_HOSTS
+
+/**
+ * 正規化済みの `ws(s)://` URL を OkHttp と同じ規則で解釈する (ホストの判定を OkHttp の
+ * 接続先と一致させるため。`ws://evil\@127.0.0.1` のような書き方で判定をすり抜けさせない)。
+ */
+internal fun parseRelayWsUrl(wsUrl: String): HttpUrl? {
+    val lower = wsUrl.lowercase()
+    val http = when {
+        lower.startsWith("ws://") -> "http://" + wsUrl.substring(5)
+        lower.startsWith("wss://") -> "https://" + wsUrl.substring(6)
+        else -> return null
+    }
+    return http.toHttpUrlOrNull()
+}
+
+/**
+ * 設定の relay URL (例 `wss://relay.example.com`, `https://relay.example.com/`, `relay.example.com`)
+ * を検証し、WebSocket 接続先 (`.../v1/session`) に正規化する。Android 依存なし。
+ *
+ * 平文 (ws:// / http://) は [allowLoopbackCleartext] が true (debug ビルド) かつホストが
+ * ループバックのときだけ受け付ける (#43)。それ以外は [RelayUrlCheck.Cleartext]
+ * (Access トークン・SIP パスワードが平文で流れるため)。release は network_security_config でも
+ * 平文を全面禁止しているので、保存前にここで弾いて理由を示す。
+ */
+fun checkRelayUrl(input: String, allowLoopbackCleartext: Boolean = BuildConfig.DEBUG): RelayUrlCheck {
     var u = input.trim()
-    require(u.isNotEmpty()) { "relay URL is empty" }
-    if (u.startsWith("http://")) u = "ws://" + u.removePrefix("http://")
-    else if (u.startsWith("https://")) u = "wss://" + u.removePrefix("https://")
-    if (!u.startsWith("ws://") && !u.startsWith("wss://")) u = "wss://$u"
+    if (u.isEmpty()) return RelayUrlCheck.Empty
+    val lower = u.lowercase()
+    u = when {
+        lower.startsWith("http://") -> "ws://" + u.substring(7)
+        lower.startsWith("https://") -> "wss://" + u.substring(8)
+        lower.startsWith("ws://") -> "ws://" + u.substring(5)
+        lower.startsWith("wss://") -> "wss://" + u.substring(6)
+        lower.contains("://") -> return RelayUrlCheck.Invalid("未対応のスキーム")
+        else -> "wss://$u"
+    }
     u = u.trimEnd('/')
     if (!u.endsWith(RelayProtocol.SESSION_PATH)) u += RelayProtocol.SESSION_PATH
-    return u
+    val parsed = parseRelayWsUrl(u) ?: return RelayUrlCheck.Invalid("URL として解釈できません")
+    if (!parsed.isHttps && !(allowLoopbackCleartext && isLoopbackHost(parsed.host))) {
+        return RelayUrlCheck.Cleartext(parsed.host, allowLoopbackCleartext)
+    }
+    return RelayUrlCheck.Ok(u)
 }
+
+/**
+ * [checkRelayUrl] で検証・正規化した接続先を返す。使えない URL なら [IllegalArgumentException]
+ * (メッセージは [RelayUrlCheck.message])。
+ */
+fun normalizeRelayUrl(input: String, allowLoopbackCleartext: Boolean = BuildConfig.DEBUG): String =
+    when (val c = checkRelayUrl(input, allowLoopbackCleartext)) {
+        is RelayUrlCheck.Ok -> c.url
+        else -> throw IllegalArgumentException(c.message)
+    }

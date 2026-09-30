@@ -60,6 +60,14 @@ type Event interface{ callEvent() }
 type EvRegistered struct {
 	OK     bool
 	Detail string
+	// Code は REGISTER の最終応答の SIP ステータス (digest 再送後) である。
+	// 応答が無い (送信失敗・タイムアウト) なら 0。401/403/407 は認証拒否を表す。
+	Code int
+}
+
+// AuthRejected は SIP サーバが資格情報を拒否した (401/403/407) かを返す。
+func (e EvRegistered) AuthRejected() bool {
+	return !e.OK && (e.Code == 401 || e.Code == 403 || e.Code == 407)
 }
 
 func (EvRegistered) callEvent() {}

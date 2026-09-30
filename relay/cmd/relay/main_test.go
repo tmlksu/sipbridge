@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +75,79 @@ func TestMuxAuthAndHello(t *testing.T) {
 	}
 	if hello.RelayVersion != "test" {
 		t.Errorf("relayVersion = %q", hello.RelayVersion)
+	}
+}
+
+// fixedAuth は常に指定の principal で認証を通す (principal の受け渡し確認用)。
+type fixedAuth struct{ principal string }
+
+func (a fixedAuth) Authenticate(*http.Request) (string, error) { return a.principal, nil }
+func (a fixedAuth) Mode() string                               { return "test" }
+
+// TestMuxPassesPrincipal は Authenticate の principal が ServeWS に届き、
+// DEVICE_BINDING=enforce で記録と異なる principal が 409 device_binding_mismatch、
+// principal の無い接続 (cf-access 相当) が 401 になることを確認する。
+// また認証失敗の応答本文に失敗理由を載せないことを確認する。
+func TestMuxPassesPrincipal(t *testing.T) {
+	factory := func(user, password, display string) (call.Backend, error) {
+		return fakebackend.New(), nil
+	}
+	store, _ := state.New("")
+	if err := store.SetDevicePush("dev-1", state.Push{Provider: "fcm", Token: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PinDevicePrincipal("dev-1", "cn:bob.access"); err != nil {
+		t.Fatal(err)
+	}
+	hub := session.NewHub(factory, push.Noop{}, store, session.Config{
+		Version: "test", DeviceBinding: session.DeviceBindingEnforce, RequirePrincipal: true,
+	}, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := hub.Run(ctx); err != nil {
+		t.Fatalf("hub.Run 失敗: %v", err)
+	}
+	wsURL := func(srv *httptest.Server) string { return "ws://" + srv.Listener.Addr().String() + "/v1/session" }
+	dialDev := func(srv *httptest.Server) (*websocket.Conn, *http.Response, error) {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		return websocket.Dial(dctx, wsURL(srv), &websocket.DialOptions{
+			HTTPHeader: http.Header{"X-Device-Id": {"dev-1"}},
+		})
+	}
+
+	alice := httptest.NewServer(buildMux(fixedAuth{"cn:alice.access"}, hub))
+	defer alice.Close()
+	_, resp, err := dialDev(alice)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusConflict {
+		t.Fatalf("別 principal は 409 のはず: err=%v resp=%v", err, resp)
+	}
+	if b, _ := io.ReadAll(resp.Body); strings.TrimSpace(string(b)) != session.DeviceBindingMismatchBody {
+		t.Errorf("409 の本文 = %q (device_binding_mismatch のはず)", b)
+	}
+	anon := httptest.NewServer(buildMux(fixedAuth{""}, hub))
+	defer anon.Close()
+	if _, resp, err := dialDev(anon); err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("principal の無い JWT (enforce) は 401 のはず: err=%v resp=%v", err, resp)
+	}
+	bob := httptest.NewServer(buildMux(fixedAuth{"cn:bob.access"}, hub))
+	defer bob.Close()
+	ws, _, err := dialDev(bob)
+	if err != nil {
+		t.Fatalf("記録どおりの principal が拒否された: %v", err)
+	}
+	_ = ws.Close(websocket.StatusNormalClosure, "")
+
+	tok := httptest.NewServer(buildMux(auth.NewTokenAuth("x"), hub))
+	defer tok.Close()
+	resp, err = http.Get(tok.URL + "/v1/session") //nolint:gosec,noctx // テスト用
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || strings.TrimSpace(string(body)) != "unauthorized" {
+		t.Errorf("認証失敗の応答が不正: %d %q", resp.StatusCode, body)
 	}
 }
 

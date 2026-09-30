@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- debug ビルドのみ平文 ws:// を許可 (adb reverse でのローカル結合試験用)。
-     リリースビルドには影響しない。 -->
+<!-- debug ビルドだけに足すもの。release には影響しない。
+     平文 ws:// の許可は usesCleartextTraffic (全ホスト) ではなく
+     src/debug/res/xml/network_security_config.xml で 127.0.0.1 / localhost に限る
+     (同名リソースで main の設定を上書きする。adb reverse でのローカル結合試験用)。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application android:usesCleartextTraffic="true">
-        <!-- debug 専用の adb 設定投入口。release には含めない。 -->
+    <application>
+        <!-- debug 専用の adb 設定投入口。release には含めない。
+             exported は adb から叩くために必要だが、permission=DUMP で保護する。
+             DUMP は signature|privileged なので第三者アプリは取得できず、
+             adb shell (uid 2000, DUMP 保持) からの明示ブロードキャスト (am broadcast -n) だけが届く
+             (androidx profileinstaller の ProfileInstallReceiver と同じ方式)。 -->
         <receiver
             android:name=".DebugConfigReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="io.github.tmlksu.sipbridge.DEBUG_SET_CONFIG" />
                 <action android:name="io.github.tmlksu.sipbridge.DEBUG_CALL_ACTION" />

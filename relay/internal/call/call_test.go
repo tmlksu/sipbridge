@@ -140,8 +140,10 @@ func TestDialFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial 失敗: %v", err)
 	}
-	if m.State() != call.StateRingingOut {
-		t.Fatalf("state = %q", m.State())
+	// fakebackend は Ringing→Answered を別 goroutine で即座に上げるため、ここで
+	// 既に Answered まで処理されている (active) ことがある。発信中か応答済みなら可。
+	if st := m.State(); st != call.StateRingingOut && st != call.StateActive {
+		t.Fatalf("state = %q", st)
 	}
 	if ev := nextEvent(t, m); ev.(call.EvRinging).CallID != id {
 		t.Fatalf("Ringing が不正: %+v", ev)

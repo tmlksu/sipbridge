@@ -13,6 +13,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/tmlksu/sipbridge/relay/internal/call"
 	"github.com/tmlksu/sipbridge/relay/internal/proto"
 	"github.com/tmlksu/sipbridge/relay/internal/push"
+	"github.com/tmlksu/sipbridge/relay/internal/sipbackend"
 	"github.com/tmlksu/sipbridge/relay/internal/state"
 )
 
@@ -67,6 +69,32 @@ type Config struct {
 	// CallStatsWait は通話終了からアプリの call_stats を待つ上限。これを過ぎたら
 	// relay 側の計測だけでログを出す。0 なら DefaultCallStatsWait (5 秒)。
 	CallStatsWait time.Duration
+
+	// 乱用対策 (#30, #31, docs/SECURITY.md)。0 / 空は既定値。
+	//
+	// DeviceBinding は X-Device-Id と principal の TOFU 結び付けの扱い
+	// (DeviceBindingOff|Warn|Enforce、空は warn)。
+	DeviceBinding string
+	// MaxAccounts は account 数の上限 (新規作成時のみ適用)。
+	MaxAccounts int
+	// MaxStoredDevices は状態ファイルに保存する端末数の上限 (新規保存時のみ適用)。
+	MaxStoredDevices int
+	// MaxOnlineDevices は同時接続の端末 (deviceID) 数の上限。接続中・保存済みの
+	// 端末の再接続は上限に達していても受け入れる。
+	MaxOnlineDevices int
+	// AuthFailureDelay は sip_account 失敗 (パスワード不一致・試行制限) の応答遅延。
+	AuthFailureDelay time.Duration
+	// MaxAuthFailures は 1 接続あたりの sip_account 失敗の許容回数 (到達で切断)。
+	MaxAuthFailures int
+	// AttemptBurst / AttemptInterval は relay 全体の sip_account 試行バケット。
+	AttemptBurst    int
+	AttemptInterval time.Duration
+	// RequirePrincipal は認証主体が必ずあるはずの認証方式 (cf-access) である
+	// ことを示す。DeviceBinding=enforce で principal の無い接続を拒否する。
+	RequirePrincipal bool
+	// ProvisionalGrace は仮の資格情報 (新規 account・パスワード変更) を認証拒否で
+	// 取り消すまでの最短時間 (最初の拒否から)。0 なら DefaultProvisionalGrace (2 分)。
+	ProvisionalGrace time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -82,6 +110,33 @@ func (c Config) withDefaults() Config {
 	if c.CallStatsWait <= 0 {
 		c.CallStatsWait = DefaultCallStatsWait
 	}
+	if c.DeviceBinding == "" {
+		c.DeviceBinding = DeviceBindingWarn
+	}
+	if c.MaxAccounts <= 0 {
+		c.MaxAccounts = DefaultMaxAccounts
+	}
+	if c.MaxStoredDevices <= 0 {
+		c.MaxStoredDevices = DefaultMaxStoredDevices
+	}
+	if c.MaxOnlineDevices <= 0 {
+		c.MaxOnlineDevices = DefaultMaxOnlineDevices
+	}
+	if c.AuthFailureDelay <= 0 {
+		c.AuthFailureDelay = DefaultAuthFailureDelay
+	}
+	if c.MaxAuthFailures <= 0 {
+		c.MaxAuthFailures = DefaultMaxAuthFailures
+	}
+	if c.AttemptBurst <= 0 {
+		c.AttemptBurst = DefaultAttemptBurst
+	}
+	if c.AttemptInterval <= 0 {
+		c.AttemptInterval = DefaultAttemptInterval
+	}
+	if c.ProvisionalGrace <= 0 {
+		c.ProvisionalGrace = DefaultProvisionalGrace
+	}
 	return c
 }
 
@@ -93,15 +148,34 @@ type Hub struct {
 	cfg     Config
 	log     *slog.Logger
 	stats   *callStatsLog // 通話品質ログ (葉のロックのみ)
+	// attempts は sip_account の全体試行バケットである (葉のロック)。
+	attempts *tokenBucket
+
+	// bindMu は sip_account の処理 (bindAccount) を直列化する。account 数の
+	// 上限判定と作成、パスワード照合と変更を不可分にするため。
+	// ロック順序は bindMu → hub.mu → group.mu。
+	bindMu sync.Mutex
 
 	mu     sync.Mutex
 	ctx    context.Context               // Run で受け取った親 ctx (group の親)
 	groups map[string]*group             // account → グループ
 	conns  map[string]map[*Conn]struct{} // deviceID → 接続集合 (全 account 横断)
 	seq    uint64                        // 接続の登録順序 (同一端末の新旧判定用)。hub.mu で保護する。
+	// pending は受け入れ途中 (reserveOnline 済み・addConn 前) の端末である。
+	pending map[string]int
+
+	// pushChanged は保存済み端末の push トークンを最後に変えた時刻である
+	// (allowPushChange。葉のロック pushMu で保護する)。
+	pushMu      sync.Mutex
+	pushChanged map[string]time.Time
+
+	// addConnHook はテスト用のフックで、addConn がグループを解決した直後
+	// (hub.mu を取る前) に呼ばれる。本番では nil。
+	addConnHook func()
 }
 
 // NewHub は Hub を作る。store が nil ならメモリのみの状態を使う。
+// store には cfg.MaxStoredDevices を新規端末の保存上限として設定する。
 func NewHub(factory BackendFactory, pusher push.Pusher, store *state.Store, cfg Config, log *slog.Logger) *Hub {
 	if log == nil {
 		log = slog.Default()
@@ -110,12 +184,17 @@ func NewHub(factory BackendFactory, pusher push.Pusher, store *state.Store, cfg 
 		store, _ = state.New("")
 	}
 	cfg = cfg.withDefaults()
+	store.SetMaxDevices(cfg.MaxStoredDevices)
 	return &Hub{
 		factory: factory, pusher: pusher, store: store,
 		cfg: cfg, log: log,
-		stats:  newCallStatsLog(log, cfg.CallStatsWait),
-		groups: make(map[string]*group),
-		conns:  make(map[string]map[*Conn]struct{}),
+		stats:    newCallStatsLog(log, cfg.CallStatsWait),
+		attempts: newTokenBucket(cfg.AttemptBurst, cfg.AttemptInterval),
+		groups:   make(map[string]*group),
+		conns:    make(map[string]map[*Conn]struct{}),
+		pending:  make(map[string]int),
+
+		pushChanged: make(map[string]time.Time),
 	}
 }
 
@@ -167,6 +246,12 @@ func (h *Hub) baseCtx() context.Context {
 
 // ensureGroup は account のグループを取得する。無ければ Backend を作って起動する。
 func (h *Hub) ensureGroup(account, password, display string) (*group, error) {
+	return h.ensureGroupProv(account, password, display, provisional{})
+}
+
+// ensureGroupProv は ensureGroup の、新しく作るときの資格情報が仮かどうかを
+// 指定できる版である (既存のグループを返すときは prov を使わない)。
+func (h *Hub) ensureGroupProv(account, password, display string, prov provisional) (*group, error) {
 	h.mu.Lock()
 	if g, ok := h.groups[account]; ok {
 		h.mu.Unlock()
@@ -175,7 +260,7 @@ func (h *Hub) ensureGroup(account, password, display string) (*group, error) {
 	h.mu.Unlock()
 
 	g := newGroup(h, account)
-	if err := g.startBackend(password, display); err != nil {
+	if err := g.startBackend(password, display, prov); err != nil {
 		return nil, err
 	}
 	h.mu.Lock()
@@ -404,26 +489,52 @@ func (h *Hub) probeDeadDevices(ctx context.Context, suspects map[string]string, 
 // ---- WS ハンドラ ----
 
 // ServeWS は 1 本の WS 接続を受け付ける。認証済みであることが前提。
-// X-Device-Id ヘッダが必須である。
+// 認証主体は WithPrincipal で r.Context() に載せておく (無ければ空)。
+//
+// X-Device-Id ヘッダが必須で、^[A-Za-z0-9._:-]{1,64}$ 以外は 400。
+// DEVICE_BINDING=enforce で端末 ID の principal が記録と異なれば 409 (device_binding_mismatch)、
+// オンライン端末数が上限なら 503 を返す (いずれも WS へ昇格する前)。
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	deviceID := r.Header.Get("X-Device-Id")
 	if deviceID == "" {
 		http.Error(w, "X-Device-Id ヘッダが必要", http.StatusBadRequest)
 		return
 	}
+	if !ValidDeviceID(deviceID) {
+		h.log.Warn("X-Device-Id の形式が不正", "len", len(deviceID))
+		http.Error(w, "X-Device-Id の形式が不正 ([A-Za-z0-9._:-] 1..64 文字)", http.StatusBadRequest)
+		return
+	}
+	principal := PrincipalFromContext(r.Context())
+	release, ok := h.reserveOnline(deviceID)
+	if !ok {
+		h.log.Warn("オンライン端末数が上限のため接続を拒否", "device", deviceID,
+			"principal", principal, "max", h.cfg.MaxOnlineDevices)
+		http.Error(w, "接続中の端末数が上限に達している", http.StatusServiceUnavailable)
+		return
+	}
+	// 端末 ID と principal の検査は枠の予約の後に行う (503 で拒否する接続で
+	// principal を記録しない)。
+	if status, body := h.checkDeviceBinding(deviceID, principal, ClientIP(r)); status != 0 {
+		release()
+		http.Error(w, body, status)
+		return
+	}
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: false,
 	})
 	if err != nil {
+		release()
 		h.log.Warn("WS accept 失敗", "err", err)
 		return
 	}
 	c := &Conn{
-		hub: h, ws: ws, deviceID: deviceID,
+		hub: h, ws: ws, deviceID: deviceID, principal: principal,
 		version: r.Header.Get("X-Client-Version"),
 		out:     make(chan outFrame, sendQueueSize),
 	}
 	h.addConn(c)
+	release()
 	defer h.removeConn(c)
 
 	g := c.group()
@@ -431,7 +542,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	if g != nil {
 		account = g.account
 	}
-	h.log.Info("WS 接続", "device", deviceID, "version", c.version, "account", account)
+	h.log.Info("WS 接続", "device", deviceID, "principal", principal, "version", c.version, "account", account)
 	if err := c.writeHello(); err != nil {
 		h.log.Warn("hello 送信失敗", "err", err)
 		_ = ws.Close(websocket.StatusInternalError, "hello failed")
@@ -479,18 +590,56 @@ func (h *Hub) replaceDuplicateConns(newConn *Conn) {
 
 // addConn は接続を登録し、結び付け済み account (無ければ既定アカウント) の
 // グループへ参加させる。
+//
+// グループの解決 (状態ファイル → ensureGroup) は hub.mu の外で行うため、その間に
+// グループが取り外される (abandonProvisional・stopGroupIfUnused) ことがある。
+// attach の直前に hub.mu の下で「h.groups[account] がそのグループで停止していない」
+// ことを確かめ、外れていれば解決からやり直す (取り外し済みのグループに付けない)。
 func (h *Hub) addConn(c *Conn) {
-	account, password, display := h.initialAccount(c.deviceID)
-	var g *group
-	if account != "" {
-		var err error
-		if g, err = h.ensureGroup(account, password, display); err != nil {
-			h.log.Warn("アカウントの起動に失敗", "account", account, "err", err)
+	const maxResolve = 3
+	for attempt := 1; ; attempt++ {
+		account, password, display := h.initialAccount(c.deviceID)
+		var g *group
+		if account != "" {
+			var err error
+			if g, err = h.ensureGroup(account, password, display); err != nil {
+				h.log.Warn("アカウントの起動に失敗", "account", account, "err", err)
+				g = nil
+			}
+		}
+		if hook := h.addConnHook; hook != nil {
+			hook()
+		}
+		// initialAccount の読み込み後に abandon で状態ファイルから消えた account の
+		// グループを ensureGroup が作り直していることがある。そのグループには付けず、
+		// 使われていなければ止めてやり直す (誤パスワードが検証済みとして復活しないように)。
+		if g != nil && account != h.cfg.DefaultAccount {
+			if _, ok := h.store.Account(account); !ok {
+				h.stopGroupIfUnused(g)
+				if attempt < maxResolve {
+					continue
+				}
+				h.log.Warn("接続先の account が取り消されたため account 無しで接続", "device", c.deviceID, "account", account)
+				g = nil
+			}
+		}
+		h.mu.Lock()
+		if g != nil && (h.groups[account] != g || g.isStopped()) {
+			if attempt < maxResolve {
+				h.mu.Unlock()
+				continue
+			}
+			h.log.Warn("接続先のグループが取り外されたため account 無しで接続", "device", c.deviceID, "account", account)
 			g = nil
 		}
+		h.attachLocked(c, g)
+		h.mu.Unlock()
+		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+}
+
+// attachLocked は接続を登録してグループへ参加させる (hub.mu 保持)。
+func (h *Hub) attachLocked(c *Conn, g *group) {
 	set, ok := h.conns[c.deviceID]
 	if !ok {
 		set = make(map[*Conn]struct{})
@@ -558,61 +707,271 @@ func (h *Hub) moveConn(c *Conn, g *group) {
 }
 
 // bindAccount は sip_account を処理する。戻り値は error メッセージの
-// code/message (空なら成功)。docs/PROTOCOL.md「SIP アカウント」節に従う。
-func (h *Hub) bindAccount(c *Conn, user, password, display string) (code, message string) {
+// code/message (空なら成功) と、SIP サーバのパスワードを新たに試す操作
+// (新規 account の作成・パスワード変更) だったか (guessed)。guessed の成功は
+// 呼び出し側で失敗と同じく遅延・回数計上の対象にする。docs/PROTOCOL.md
+// 「SIP アカウント」節と docs/SECURITY.md §3.3 に従う。
+//
+// パスワード規則 (乗っ取り防止):
+//   - その account に既に結び付いた端末 (状態ファイルの結び付け) は、保存値と
+//     一致すれば受理。不一致でも account が未登録/登録失敗中ならパスワード変更
+//     として受理して Backend を作り直す (Asterisk 側で変えた後の追従)。
+//   - 結び付いていない端末 (既定アカウントへの暫定参加を含む) は、登録状態に
+//     関わらず保存値との一致が必須。未登録の間に誤パスワードで結び付いて
+//     内線を奪うことを防ぐ。
+//
+// 乱用対策 (#30): 保存値と一致しない試行 (パスワード変更を含む)、結び付いて
+// いない端末の試行、新規 account の作成は全体の試行バケットを消費する
+// (結び付いた端末の同じパスワードの再送は消費しない)。新規 account は
+// MaxAccounts、新規端末の保存は MaxStoredDevices で制限する。新しい資格情報は
+// REGISTER に成功するまで「仮」とし、認証で拒否され続けたら取り消す
+// (group.onRegistration / abandonProvisional)。
+func (h *Hub) bindAccount(c *Conn, user, password, display string) (code, message string, guessed bool) {
+	h.bindMu.Lock()
+	defer h.bindMu.Unlock()
+
 	if user == "" {
 		if err := h.store.SetDeviceAccount(c.deviceID, ""); err != nil {
-			return "store_failed", err.Error()
+			return "store_failed", err.Error(), false
 		}
 		h.moveConn(c, nil)
 		h.log.Info("account 結び付け解除", "device", c.deviceID)
-		return "", ""
+		return "", "", false
 	}
+	// user/display は SIP ヘッダに載るので、状態ファイルへ保存する前に検証・整形する (#32)。
+	if err := sipbackend.ValidateUser(user); err != nil {
+		return "account_failed", err.Error(), false
+	}
+	display = sipbackend.SanitizeDisplay(display)
+
+	dev, _ := h.store.Device(c.deviceID)
+	bound := dev.Account == user
+	// 上限の判定だけ先に行う。追い出し (状態ファイルの書き込み) は試行制限と
+	// パスワード照合を通って受理が確定してから (makeRoom)。
+	tooMany := func() (string, string, bool) {
+		h.log.Warn("保存端末数が上限のため sip_account を拒否", "device", c.deviceID, "max", h.cfg.MaxStoredDevices)
+		return codeTooManyDevices, "保存できる端末数の上限に達している", false
+	}
+	if !bound && !h.deviceRoomAvailable(c.deviceID) {
+		return tooMany()
+	}
+	makeRoom := func() bool { return bound || h.ensureDeviceRoom(c.deviceID) }
 
 	h.mu.Lock()
 	g := h.groups[user]
 	h.mu.Unlock()
+	stored, hasStored := h.store.Account(user)
 
-	if g != nil {
+	created := false
+	switch {
+	case g != nil:
 		curPassword, curDisplay := g.credentials()
+		match := secretEqual(password, curPassword)
+		// 保存値と一致しない試行は、結び付いた端末からのパスワード変更も含めて
+		// 全体の試行制限を受ける (未使用内線を 1 つ作ってパスワード変更を
+		// 繰り返す総当たりを防ぐ)。
+		if (!bound || !match) && !h.takeAttempt(c, user) {
+			return codeRateLimited, "試行が多すぎる。しばらく待って再試行すること", false
+		}
 		switch {
-		case password == curPassword:
+		case match:
+			if !makeRoom() {
+				return tooMany()
+			}
 			if display != "" && display != curDisplay {
 				g.setDisplay(display)
 				if err := h.store.SetAccount(user, state.Account{Password: password, Display: display}); err != nil {
 					h.log.Warn("account の保存に失敗", "account", user, "err", err)
 				}
 			}
-		case g.registered():
-			// 登録済み内線の乗っ取り・DoS を防ぐ。結び付けは変更しない。
-			h.log.Warn("account のパスワード不一致", "account", user, "device", c.deviceID)
-			return "account_password_mismatch", "登録済みアカウントのパスワードが一致しない"
+		case !bound || g.registered():
+			// 結び付いていない端末は登録状態に関わらず一致必須。登録済みの内線は
+			// 結び付いた端末からでも変更させない (乗っ取り・DoS 防止)。結び付けは変更しない。
+			h.log.Warn("account のパスワード不一致", "account", user, "device", c.deviceID, "bound", bound)
+			return codePasswordMismatch, "アカウントのパスワードが一致しない", false
 		default:
-			// 未登録/登録失敗中なら新しいパスワードで Backend を作り直す。
-			if err := g.startBackend(password, display); err != nil {
-				return "account_failed", err.Error()
+			// 結び付いた端末からの、未登録/登録失敗中のパスワード変更。
+			if err := g.startBackend(password, display, g.provisionalForChange()); err != nil {
+				return "account_failed", err.Error(), true
 			}
 			if err := h.store.SetAccount(user, state.Account{Password: password, Display: display}); err != nil {
 				h.log.Warn("account の保存に失敗", "account", user, "err", err)
 			}
-			h.log.Info("account のパスワードを更新", "account", user)
+			h.log.Info("account のパスワードを更新 (REGISTER 成功まで仮)", "account", user, "device", c.deviceID)
+			guessed = true
 		}
-	} else {
+	case hasStored:
+		// 保存済みだが起動していない (起動時の Backend 生成失敗等)。結び付いた
+		// 端末なら送られた値で起動し直す (保存値と違えばパスワード変更扱い)。
+		// それ以外は保存値との一致が必須。
+		match := secretEqual(password, stored.Password)
+		if (!bound || !match) && !h.takeAttempt(c, user) {
+			return codeRateLimited, "試行が多すぎる。しばらく待って再試行すること", false
+		}
+		if !bound && !match {
+			h.log.Warn("account のパスワード不一致", "account", user, "device", c.deviceID, "bound", bound)
+			return codePasswordMismatch, "アカウントのパスワードが一致しない", false
+		}
+		if !makeRoom() {
+			return tooMany()
+		}
+		prov := provisional{}
+		if !match {
+			prov = provisional{mode: provPasswordChange, prevPassword: stored.Password, prevDisplay: stored.Display}
+			guessed = true
+		}
 		var err error
-		if g, err = h.ensureGroup(user, password, display); err != nil {
-			return "account_failed", err.Error()
+		if g, err = h.ensureGroupProv(user, password, display, prov); err != nil {
+			return "account_failed", err.Error(), guessed
 		}
+		if err := h.store.SetAccount(user, state.Account{Password: password, Display: display}); err != nil {
+			h.log.Warn("account の保存に失敗", "account", user, "err", err)
+		}
+	default:
+		// 新規 account の作成 (REGISTER 成功まで仮)。
+		if n := h.accountCount(); n >= h.cfg.MaxAccounts {
+			h.log.Warn("account 数が上限のため作成を拒否", "account", user, "device", c.deviceID, "max", h.cfg.MaxAccounts)
+			return codeTooManyAccounts, "アカウント数の上限に達している", false
+		}
+		if !h.takeAttempt(c, user) {
+			return codeRateLimited, "試行が多すぎる。しばらく待って再試行すること", false
+		}
+		if !makeRoom() {
+			return tooMany()
+		}
+		guessed = true
+		var err error
+		if g, err = h.ensureGroupProv(user, password, display, provisional{mode: provNewAccount}); err != nil {
+			return "account_failed", err.Error(), guessed
+		}
+		created = true
 		if err := h.store.SetAccount(user, state.Account{Password: password, Display: display}); err != nil {
 			h.log.Warn("account の保存に失敗", "account", user, "err", err)
 		}
 	}
 
 	if err := h.store.SetDeviceAccount(c.deviceID, user); err != nil {
-		return "store_failed", err.Error()
+		if created {
+			h.stopGroupIfUnused(g) // 作ったばかりの account を残さない
+		}
+		if errors.Is(err, state.ErrTooManyDevices) {
+			return codeTooManyDevices, "保存できる端末数の上限に達している", guessed
+		}
+		return "store_failed", err.Error(), guessed
 	}
+	h.pinPrincipal(c)
 	h.moveConn(c, g)
 	h.log.Info("account 結び付け", "device", c.deviceID, "account", user)
+	return "", "", guessed
+}
+
+// abandonProvisional は仮の資格情報が SIP サーバに認証で拒否され続けたときの
+// 後始末である (group.onRegistration から別 goroutine で呼ばれる)。
+//   - 新規 account: 状態ファイルから削除し (結び付けも消える)、hub.mu の下で
+//     グループを外して所属接続を切り離してから止める。所属端末には
+//     error account_failed を送る。
+//   - パスワード変更: 変更前の資格情報に戻して Backend を作り直す。作り直しに
+//     失敗したら状態ファイルは変えない (メモリと食い違わせない)。
+//
+// 判定から実行までの間に Backend が作り直されていたら (takeAbandon が false) 何もしない。
+func (h *Hub) abandonProvisional(g *group, mgr *call.Manager, fails int, since time.Duration, detail string) {
+	h.bindMu.Lock()
+	defer h.bindMu.Unlock()
+	prov, ok := g.takeAbandon(mgr)
+	if !ok {
+		return
+	}
+	switch prov.mode {
+	case provNewAccount:
+		h.log.Warn("新規アカウントの REGISTER が認証で拒否され続けたため削除する",
+			"account", g.account, "failures", fails, "since", since.Round(time.Second).String(), "detail", detail)
+		// 先に状態ファイルから消す (これ以後の addConn は結び付けを見つけない)。
+		if err := h.store.RemoveAccount(g.account); err != nil {
+			h.log.Warn("account の削除に失敗", "account", g.account, "err", err)
+		}
+		// グループの取り外しと所属接続の切り離しを hub.mu の下でまとめて行う。
+		// addConn は attach 直前に hub.mu の下でグループが現役かを確かめるので、
+		// 取り外した後のグループに接続が付くことはない。
+		h.mu.Lock()
+		if h.groups[g.account] == g {
+			delete(h.groups, g.account)
+		}
+		conns := g.connList()
+		for _, c := range conns {
+			if c.grp.CompareAndSwap(g, nil) {
+				g.detach(c)
+			}
+		}
+		h.mu.Unlock()
+		g.stop()
+		for _, c := range conns {
+			c.sendError("account_failed", "SIP サーバが認証を拒否したためアカウントを削除した (内線番号・パスワードを確認すること)")
+		}
+	case provPasswordChange:
+		h.log.Warn("変更後のパスワードの REGISTER が認証で拒否され続けたため元に戻す",
+			"account", g.account, "failures", fails, "since", since.Round(time.Second).String(), "detail", detail)
+		if err := g.startBackend(prov.prevPassword, prov.prevDisplay, provisional{}); err != nil {
+			h.log.Warn("元の資格情報での再起動に失敗 (状態ファイルは変更しない)", "account", g.account, "err", err)
+			return
+		}
+		if err := h.store.SetAccount(g.account, state.Account{Password: prov.prevPassword, Display: prov.prevDisplay}); err != nil {
+			h.log.Warn("account の保存に失敗", "account", g.account, "err", err)
+		}
+		for _, c := range g.connList() {
+			c.sendError("account_failed", "SIP サーバが新しいパスワードを拒否したため元に戻した")
+		}
+	}
+}
+
+// registerPush は register_push を処理する。戻り値は error の code/message (空なら成功)。
+//
+// 状態ファイルに無い端末の登録は全体の試行バケットを消費し、保存数の上限では
+// account の無い古い端末を追い出して空きを作る (ensureDeviceRoom)。保存済み端末の
+// トークン変更は pushUpdateMinInterval に 1 回までに間引く (同じ値なら書かない)。
+func (h *Hub) registerPush(c *Conn, provider, token string) (code, message string) {
+	h.bindMu.Lock()
+	defer h.bindMu.Unlock()
+	p := state.Push{Provider: provider, Token: token}
+	d, known := h.store.Device(c.deviceID)
+	if known && d.Push != nil && *d.Push == p {
+		h.pinPrincipal(c)
+		return "", "" // 変化なし (書かない)
+	}
+	if !known {
+		if !h.deviceRoomAvailable(c.deviceID) {
+			h.log.Warn("保存端末数が上限のため register_push を拒否", "device", c.deviceID, "max", h.cfg.MaxStoredDevices)
+			return codeTooManyDevices, "保存できる端末数の上限に達している"
+		}
+		if !h.takeAttempt(c, "") {
+			return codeRateLimited, "試行が多すぎる。しばらく待って再試行すること"
+		}
+		if !h.ensureDeviceRoom(c.deviceID) {
+			h.log.Warn("保存端末数が上限のため register_push を拒否", "device", c.deviceID, "max", h.cfg.MaxStoredDevices)
+			return codeTooManyDevices, "保存できる端末数の上限に達している"
+		}
+	} else if !h.allowPushChange(c.deviceID) {
+		h.log.Warn("push 登録の更新が頻繁すぎるため無視", "device", c.deviceID)
+		return codeRateLimited, "push 登録の更新が頻繁すぎる"
+	}
+	if err := h.store.SetDevicePush(c.deviceID, p); err != nil {
+		h.log.Warn("push 登録の保存失敗", "err", err, "device", c.deviceID)
+		if errors.Is(err, state.ErrTooManyDevices) {
+			return codeTooManyDevices, "保存できる端末数の上限に達している"
+		}
+		return "store_failed", "push 登録の保存に失敗"
+	}
+	h.pinPrincipal(c)
+	h.log.Info("push 登録", "device", c.deviceID, "provider", provider)
 	return "", ""
+}
+
+// takeAttempt は全体の試行バケットからトークンを取る。空ならログを出して false。
+func (h *Hub) takeAttempt(c *Conn, user string) bool {
+	if h.attempts.take() {
+		return true
+	}
+	h.log.Warn("sip_account の試行が多すぎる (全体の試行制限)", "device", c.deviceID, "account", user, "principal", c.principal)
+	return false
 }
 
 // ---- Conn ----
@@ -623,6 +982,10 @@ type Conn struct {
 	ws       *websocket.Conn
 	deviceID string
 	version  string
+	// principal は認証主体 (Access JWT の sub / common_name。token モードは空)。
+	principal string
+	// authFailures は sip_account の失敗回数 (readLoop の goroutine だけが触る)。
+	authFailures int
 	// seq は登録順序 (Hub.seq の写し)。同一端末の新旧判定に使う。
 	// addConn で hub.mu の保護下で一度だけ書き、それ以後は不変。
 	seq uint64
@@ -865,16 +1228,22 @@ func (c *Conn) handleText(data []byte) {
 			return
 		}
 		// push 登録は account の有無に関わらず端末情報として保存する。
-		if err := c.hub.store.SetDevicePush(c.deviceID, state.Push{Provider: m.Provider, Token: m.Token}); err != nil {
-			c.hub.log.Warn("push 登録の保存失敗", "err", err)
-			c.sendError("store_failed", "push 登録の保存に失敗")
+		if code, message := c.hub.registerPush(c, m.Provider, m.Token); code != "" {
+			c.sendError(code, message)
+		}
+	case *proto.SipAccount:
+		code, message, guessed := c.hub.bindAccount(c, m.User, m.Password, m.Display)
+		if code == codePasswordMismatch || code == codeRateLimited {
+			c.sipAccountFailed(code, message)
 			return
 		}
-		c.hub.log.Info("push 登録", "device", c.deviceID, "provider", m.Provider)
-	case *proto.SipAccount:
-		code, message := c.hub.bindAccount(c, m.User, m.Password, m.Display)
 		if code != "" {
 			c.sendError(code, message)
+			return
+		}
+		// 新しいパスワードを試す操作 (新規作成・パスワード変更) は受理しても
+		// 失敗と同じく遅延・回数計上する (総当たりの速度を 1 接続あたり抑える)。
+		if guessed && !c.noteGuess() {
 			return
 		}
 		// 受理したら改めて hello を送る (account/registered/call は新しい group のもの)。
@@ -893,6 +1262,37 @@ func (c *Conn) handleText(data []byte) {
 	default:
 		c.sendError("bad_message", fmt.Sprintf("relay は種別 %T を受け付けない", msg))
 	}
+}
+
+// sipAccountFailed は sip_account の失敗 (パスワード不一致・試行制限) に応答する。
+// 応答を AuthFailureDelay だけ遅らせ (1 接続は逐次処理なので総当たりの速度を
+// 抑える)、MaxAuthFailures 回目で error を送ってから接続を閉じる (1008)。
+func (c *Conn) sipAccountFailed(code, message string) {
+	c.authFailures++
+	time.Sleep(c.hub.cfg.AuthFailureDelay)
+	if c.authFailures < c.hub.cfg.MaxAuthFailures {
+		c.sendError(code, message)
+		return
+	}
+	c.hub.log.Warn("sip_account の失敗が続いたため切断", "device", c.deviceID,
+		"principal", c.principal, "failures", c.authFailures)
+	_ = c.sendJSONSync(&proto.Error{T: proto.TError, Code: code, Message: message})
+	_ = c.ws.Close(websocket.StatusPolicyViolation, closeReasonTooManyFailures)
+}
+
+// noteGuess は SIP サーバのパスワードを新たに試す sip_account (新規作成・
+// パスワード変更) を 1 回の失敗と同じく数え、AuthFailureDelay だけ遅らせる。
+// 上限に達したら接続を閉じて false を返す。
+func (c *Conn) noteGuess() bool {
+	c.authFailures++
+	time.Sleep(c.hub.cfg.AuthFailureDelay)
+	if c.authFailures < c.hub.cfg.MaxAuthFailures {
+		return true
+	}
+	c.hub.log.Warn("sip_account の試行が続いたため切断", "device", c.deviceID,
+		"principal", c.principal, "failures", c.authFailures)
+	_ = c.ws.Close(websocket.StatusPolicyViolation, closeReasonTooManyFailures)
+	return false
 }
 
 // requireGroup は所属グループを返し、無ければ no_account を返して nil を返す。

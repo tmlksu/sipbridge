@@ -7,6 +7,12 @@
 # 理由: relay が RTP 用 UDP ポート範囲 (RTP_PORT_MIN..MAX) を使うため、
 # ポートマッピングより host モードが素直。relay 自身は LISTEN
 # (既定 127.0.0.1:8080) のみで待ち受け、外部公開は cloudflared 経由のみ。
+# host モードでは各プロセスの待ち受けがそのまま LAN に出るため、cloudflared の
+# metrics (/metrics /config /debug/pprof) も 127.0.0.1 に限定する (#37)。
+#
+# 両サービスとも read_only / cap_drop: ALL / no-new-privileges で動かす。
+# relay が書くのは bind mount した ./data (状態ファイル) だけ。
+# セキュリティモデル全体は docs/SECURITY.md。
 
 name: sipbridge
 
@@ -22,6 +28,9 @@ services:
       - path: .env
         required: false # .env 無しでも `docker compose config` が通るように (本番は .env を置くこと)
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     # 状態ファイル (push トークン) と FCM サービスアカウントの置き場。
     # network_mode: host でもファイルシステムはコンテナ内なので bind mount が必要。
     # 事前に: mkdir -p data && sudo chown 65532:65532 data (relay は UID 65532 で動く)
@@ -38,9 +47,20 @@ services:
       start_period: 15s
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # バージョンは固定する (latest は意図しない更新・供給網リスクがある)。
+    # 更新手順は docs/SECURITY.md「cloudflared の更新」。
+    image: cloudflare/cloudflared:2026.9.3
     container_name: sipbridge-cloudflared
     network_mode: host
-    # TUNNEL_TOKEN は .env で渡す (compose が deploy/.env を自動読込して展開する)。
-    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN:-}
+    # トークンは argv ではなく環境変数 TUNNEL_TOKEN で渡す (cloudflared が読む)。
+    # argv だとホストの ps / /proc/<pid>/cmdline から誰でも読めるため。
+    # 値は deploy/.env から compose が展開する。
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    # --metrics を明示しないと host ネットワークの全インタフェースで metrics
+    # サーバ (/metrics /config /debug/pprof) が開き LAN から見える。
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]

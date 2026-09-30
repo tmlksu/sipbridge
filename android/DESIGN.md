@@ -118,7 +118,7 @@ WebSocket クライアント + Nocturne UI (`docs/UI-DESIGN.md`) に作り替え
 | `HistoryStore` | 永続化 | 通話履歴 (`filesDir/history.json`、最大 200 件。Android 非依存。JVM テスト可) (§8) |
 | `ContactStore` | 永続化 | 連絡先 (`filesDir/contacts.json`、番号正規化・検索。Android 非依存。JVM テスト可) (§8) |
 | `DeviceContacts` | 連絡先連携 | 端末の連絡先の権限判定 + クエリ (番号ごとに 1 件・名前順。UI は持たない。重複除去・検索フィルタは Android 非依存で JVM テスト可) (§8) |
-| `BridgeConfig` | 設定 | `EncryptedSharedPreferences` (失敗時は平文フォールバック)。sipUser/sipPassword/sipDisplay/speakerOnAnswer (既定 OFF)/deviceContactsEnabled (既定 OFF) を含む (§8) |
+| `BridgeConfig` | 設定 | `EncryptedSharedPreferences` (開けないときの扱いは §8)。sipUser/sipPassword/sipDisplay/speakerOnAnswer (既定 OFF)/deviceContactsEnabled (既定 OFF) を含む (§8) |
 | `NotificationHelper` | 通知 | チャンネル・常駐/着信/通話中通知 (UI-DESIGN §2.1 の文言) |
 | `CallOverlayManager` | オーバーレイ | 着信バブル (応答/拒否) + 通話中ピル (§9)。`hide()` は両方隠す |
 | `BootReceiver` | Receiver | 起動時自動開始 (`autostart` ON のとき `BridgeService.start`) |
@@ -196,7 +196,18 @@ WebSocket クライアント + Nocturne UI (`docs/UI-DESIGN.md`) に作り替え
 
 ## 8. 設定・保存
 
-- `BridgeConfig` (`EncryptedSharedPreferences`。失敗時は平文フォールバック):
+- `BridgeConfig` (`EncryptedSharedPreferences`。開けないときの扱いは下記):
+  - 一時障害 (Keystore の一時的な失敗など): データは消さず再試行。駄目なら「一時的に使えない」として
+    読み込みは保留・保存はしない (平文にも書かない)。設定画面・状態表示で知らせ、Service は後で読み直す。
+  - 一部の項目だけ変えるときは `BridgeConfig.update { it.copy(...) }` (読込→変換→書込をロック内で行う)。
+    保存領域を使えなかったときの既定値 (`fromStore=false`) は `save` しても書かれない。
+  - 壊れている (復号できない・鍵が失われた) 判定が別々の起動で 2 回続いたら (または同じプロセスで
+    最初の判定から 10 分以上・3 回以上試して全て壊れ判定なら)、壊れたファイルを
+    `shared_prefs/<名前>.broken-<時刻>.xml` に退避し、新しい鍵 alias・ファイル名 (`sipbridge_enc2` …) で
+    作り直す。設定は初期化されるので設定画面で再設定を促す。世代・破損カウンタは `sipbridge_meta` (平文、秘密なし)。
+  - 作り直した新しい世代でも壊れている端末だけ平文で動き、設定画面に警告を出す (以後は世代を増やさない)。
+  - 退避した `.broken-*.xml` は**自動では消さない** (復旧調査用。不要なら手動で削除。容量が問題になれば
+    将来、一定期間後に自動削除する)。
 
 | 項目 | 備考 |
 |---|---|
@@ -227,11 +238,19 @@ WebSocket クライアント + Nocturne UI (`docs/UI-DESIGN.md`) に作り替え
 ## 10. debug 専用 receiver (`DebugConfigReceiver`)
 
 - `src/debug` 配下 + debug manifest の receiver のため **release には含まれない**。
-- `adb shell am broadcast -a io.github.tmlksu.sipbridge.DEBUG_SET_CONFIG` で設定投入
-  (Echo Show など入力しづらい端末用。詳細は `INSTALL.md` と `scripts/adb-setup.sh`)。
+- `adb shell am broadcast -n io.github.tmlksu.sipbridge/.DebugConfigReceiver -a io.github.tmlksu.sipbridge.DEBUG_SET_CONFIG`
+  で設定投入 (Echo Show など入力しづらい端末用。詳細は `INSTALL.md` と `scripts/adb-setup.sh`)。
 - `DEBUG_CALL_ACTION` (action=answer|reject|hangup|dial, to=番号) で通話操作
-  (E2E スクリプト用)。
-- debug ビルドは平文 `ws://` も許可 (`usesCleartextTraffic`。adb reverse 試験用)。
+  (E2E スクリプト用。同じく `-n io.github.tmlksu.sipbridge/.DebugConfigReceiver` を付ける)。
+- receiver は exported だが `android:permission="android.permission.DUMP"` で保護する。
+  DUMP は第三者アプリが取得できず、adb shell (uid 2000) は持っているので、adb からの
+  明示ブロードキャストだけが届く (probe ビルドの `TelecomProbeReceiver` も同じ)。
+- relayUrl は設定画面と同じ検証 (`checkRelayUrl`) を通す。平文の非ループバック宛ては保存しない
+  (release の設定画面ではループバック宛ての平文も保存しない)。
+- debug ビルドは平文 `ws://` を **ループバック (127.0.0.1 / localhost) 宛てだけ** 許可する
+  (`src/debug/res/xml/network_security_config.xml`。adb reverse 試験用)。
+  release / probe は `src/main/res/xml/network_security_config.xml` で平文を全面禁止し、
+  信頼する CA も OS 標準 (system) のみ (ユーザー追加の CA は信頼しない。ピンニングはしない)。
 
 ## 11. 通知文言 (UI-DESIGN §2.1、`NotificationHelper`)
 
