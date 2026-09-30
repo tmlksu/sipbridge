@@ -3,6 +3,7 @@
 sipbridge (アプリ ⇄ Cloudflare ⇄ relay ⇄ Asterisk) が何を守り、何を守らないか、
 運用で何をすべきかをまとめる。方式全体は `DESIGN.md` §4、プロトコルは `docs/PROTOCOL.md`、
 構築手順は `docs/SETUP.md`。括弧内の `#番号` は GitHub issue。
+2026-10 の改修の背景・ベストプラクティスとの対応は `docs/SECURITY-REVIEW-2026-10.md` (学習用の解説)。
 
 ## 1. 守るものと想定する攻撃者
 
