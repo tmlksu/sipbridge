@@ -183,3 +183,51 @@ func TestLoadErrors(t *testing.T) {
 		t.Errorf("空でない: %+v %+v", s.Accounts(), s.Devices())
 	}
 }
+
+// TestSkipUnchangedWrite は内容が変わらない保存でファイルを書かないことの確認である。
+// 保存後にファイルを消し、同じ値で呼んでも再作成されなければ書いていない。
+func TestSkipUnchangedWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := state.New(path)
+	if err != nil {
+		t.Fatalf("New 失敗: %v", err)
+	}
+	acc := state.Account{Password: "pw101", Display: "居間"}
+	push := state.Push{Provider: "fcm", Token: "tok-A"}
+	if err := s.SetAccount("101", acc); err != nil {
+		t.Fatalf("SetAccount 失敗: %v", err)
+	}
+	if err := s.SetDevicePush("dev-A", push); err != nil {
+		t.Fatalf("SetDevicePush 失敗: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove 失敗: %v", err)
+	}
+
+	if err := s.SetAccount("101", acc); err != nil {
+		t.Fatalf("SetAccount (同値) 失敗: %v", err)
+	}
+	if err := s.SetDevicePush("dev-A", push); err != nil {
+		t.Fatalf("SetDevicePush (同値) 失敗: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("同じ値の保存でファイルが書かれた (err=%v)", err)
+	}
+
+	// 値が変われば書く。
+	if err := s.SetDevicePush("dev-A", state.Push{Provider: "fcm", Token: "tok-B"}); err != nil {
+		t.Fatalf("SetDevicePush (変更) 失敗: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("変更後にファイルが無い: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove 失敗: %v", err)
+	}
+	if err := s.SetAccount("101", state.Account{Password: "pw101", Display: "台所"}); err != nil {
+		t.Fatalf("SetAccount (変更) 失敗: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("account 変更後にファイルが無い: %v", err)
+	}
+}
