@@ -9,11 +9,19 @@ import (
 	"sync/atomic"
 
 	"github.com/tmlksu/sipbridge/relay/internal/call"
+	"github.com/tmlksu/sipbridge/relay/internal/rtpstats"
 )
 
 // recvQueueLen は MediaPipe.Recv のバッファ長である。
 // fakebackend と同じ 50 とし、溢れたら古い方を捨てる。
 const recvQueueLen = 50
+
+// recvSlabSize は受信パケットを切り出す塊の大きさである。
+// G.711 20ms (約 172 バイト) なら 1 塊で約 95 パケット、確保は 2 秒に 1 回程度になる。
+const recvSlabSize = 16 << 10
+
+// maxDatagram は 1 回の受信で読む上限である。
+const maxDatagram = 2048
 
 // rtpPipe は UDP ソケット上の RTP 送受パイプである。
 // call.MediaPipe を満たす。RTCP と見られるパケットは捨てる。
@@ -32,6 +40,8 @@ type rtpPipe struct {
 	// log は破棄の警告先である (未設定なら slog.Default)。
 	log     *slog.Logger
 	dropped atomic.Uint64
+	// stats は Asterisk→relay 区間の受信統計 (readLoop だけが書く。atomic)。
+	stats rtpstats.Stats
 }
 
 var _ call.MediaPipe = (*rtpPipe)(nil)
@@ -52,6 +62,9 @@ func newRTPPipe(conn *net.UDPConn, remote *net.UDPAddr, log *slog.Logger) *rtpPi
 
 // DroppedPackets は受信キュー溢れで捨てたパケット数である。
 func (p *rtpPipe) DroppedPackets() uint64 { return p.dropped.Load() }
+
+// RTPStats は Asterisk から受信した RTP の統計である (docs/QUALITY_STATS.md)。
+func (p *rtpPipe) RTPStats() rtpstats.Snapshot { return p.stats.Snapshot() }
 
 func (p *rtpPipe) logger() *slog.Logger {
 	if p.log != nil {
@@ -101,7 +114,15 @@ func (p *rtpPipe) Close() error {
 
 func (p *rtpPipe) readLoop() {
 	defer p.wg.Done()
-	buf := make([]byte, 2048)
+	buf := make([]byte, maxDatagram)
+	// 受信パケットは slab (塊) から重ならないように切り出して渡す。
+	// sync.Pool で使い回さないのは、パケットが Recv の先で session の
+	// メディアポンプ → 接続ごとの送信キュー (勝者の複数接続へ同じスライスを
+	// 共有) → writeLoop へ渡り、キュー溢れ・切断で途中破棄もされるため、
+	// 「いつ誰が返却するか」を MediaPipe の境界越しに追えないからである。
+	// slab は一度切り出した領域を二度と書かないので、所有権を追う必要が無く
+	// GC が最後の参照が消えた時点で回収する。
+	var slab []byte
 	for {
 		n, _, err := p.conn.ReadFromUDP(buf)
 		if err != nil {
@@ -114,7 +135,14 @@ func (p *rtpPipe) readLoop() {
 		if isRTCP(buf[:n]) {
 			continue // v1 では RTCP を扱わない
 		}
-		cp := append([]byte(nil), buf[:n]...)
+		p.stats.Observe(buf[:n])
+		if len(slab) < n {
+			slab = make([]byte, recvSlabSize)
+		}
+		// cap を n に絞り、受け手が append しても隣のパケットを壊さないようにする。
+		cp := slab[:n:n]
+		slab = slab[n:]
+		copy(cp, buf[:n])
 		select {
 		case p.ch <- cp:
 		default:
