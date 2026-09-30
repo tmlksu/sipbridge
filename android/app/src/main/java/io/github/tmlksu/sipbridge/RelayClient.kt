@@ -73,7 +73,9 @@ class RelayClient(
          * (`UnknownServiceException: CLEARTEXT communication to <host> not permitted ...`)。
          */
         fun isCleartextBlocked(t: Throwable): Boolean =
-            t is java.net.UnknownServiceException && t.message?.contains("CLEARTEXT") == true
+            // OkHttp / プラットフォームは平文禁止を UnknownServiceException で投げる。
+            // メッセージ ("CLEARTEXT communication ... not permitted") は将来変わりうるので型で判定する。
+            t is java.net.UnknownServiceException
         private const val MAX_BACKOFF_SEC = 30L
         /**
          * OkHttp の client→server WS ping 周期 (#25)。

@@ -428,6 +428,12 @@ object BridgeConfig {
             val dst = File(dir, "$name.broken-${System.currentTimeMillis()}.xml")
             if (src.renameTo(dst)) Log.w(TAG, "quarantined $name.xml -> ${dst.name}")
             else Log.w(TAG, "quarantine rename failed: $name.xml")
+            // SharedPreferences の書き込み途中の退避 (.bak) も動かす。残すと次に同名で開いたとき
+            // 壊れた内容が復元されうる。
+            val bak = File(dir, "$name.xml.bak")
+            if (bak.exists() && !bak.renameTo(File(dir, "${dst.name}.bak"))) {
+                Log.w(TAG, "quarantine rename failed: $name.xml.bak")
+            }
         }.onFailure { Log.w(TAG, "quarantine failed: ${PrefsFailure.describe(it)}") }
     }
 

@@ -324,7 +324,7 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             // 保存済みの relay URL が使えない形 (旧版で保存した平文の LAN 宛てなど) なら理由を出す (#43)。
             // 接続側 (RelayClient) はこの場合、設定が変わるまで再接続しない。
             val savedUrlError = savedRelayUrlError(cfg.relayUrl)
-            if (savedUrlError != null && !tilRelayUrl.hasFocus()) tilRelayUrl.error = savedUrlError
+            if (!storageUnavailable && !tilRelayUrl.hasFocus()) tilRelayUrl.error = savedUrlError
             // 暗号化ストアが壊れていて初期化した場合は再設定を促す。揃ったら通知を消す (#42)。
             val resetNotice = !storageUnavailable && BridgeConfig.configResetAt(ctx) > 0L
             if (resetNotice && missing.isEmpty()) BridgeConfig.clearConfigResetNotice(ctx)

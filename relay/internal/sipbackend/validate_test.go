@@ -21,6 +21,7 @@ func TestNormalizeDialTarget(t *testing.T) {
 		{"*67#", "*67#"},
 		{"alice", "alice"},
 		{"alice.b", "alice.b"},
+		{"alice+ext", "alice+ext"}, // userRe と同じ文字種 (#50)
 		{"bob-2_x", "bob-2_x"},
 		{"03-1234-5678", "0312345678"},
 		{"(03) 1234 5678", "0312345678"},

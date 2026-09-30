@@ -253,7 +253,7 @@ class RelayProtocolTest {
                 )
             )
         )
-        assertFalse(RelayClient.isCleartextBlocked(java.net.UnknownServiceException("other")))
+        assertTrue(RelayClient.isCleartextBlocked(java.net.UnknownServiceException("other")))
         assertFalse(RelayClient.isCleartextBlocked(java.io.IOException("CLEARTEXT")))
     }
 
