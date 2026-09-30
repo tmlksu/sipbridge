@@ -21,7 +21,8 @@ var (
 	// キーパッドの 0-9 * # と先頭の + のみ。
 	dialNumericRe = regexp.MustCompile(`^\+?[0-9*#]{1,32}$`)
 	// dialAlphaRe は英字を含む発信先 (SIP の user 名、例 alice) である。
-	dialAlphaRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	// userRe と同じ文字種にする (登録できる user 名には発信もできるように, #50)。
+	dialAlphaRe = regexp.MustCompile(`^[A-Za-z0-9._+-]{1,64}$`)
 	// userRe は SIP アカウントのユーザ名 (内線番号・認証 ID) である。
 	userRe = regexp.MustCompile(`^[A-Za-z0-9._+-]{1,64}$`)
 )
@@ -69,7 +70,7 @@ func normalizeDialTarget(to string) (string, error) {
 	}
 	if hasAlpha {
 		if !dialAlphaRe.MatchString(dec) {
-			return "", fmt.Errorf("発信先の形式が不正 (英字の宛先は A-Z a-z 0-9 . _ - のみ、64 文字以内)")
+			return "", fmt.Errorf("発信先の形式が不正 (英字の宛先は A-Z a-z 0-9 . _ + - のみ、64 文字以内)")
 		}
 		return dec, nil
 	}

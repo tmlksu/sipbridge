@@ -492,7 +492,7 @@ func (h *Hub) probeDeadDevices(ctx context.Context, suspects map[string]string, 
 // 認証主体は WithPrincipal で r.Context() に載せておく (無ければ空)。
 //
 // X-Device-Id ヘッダが必須で、^[A-Za-z0-9._:-]{1,64}$ 以外は 400。
-// DEVICE_BINDING=enforce で端末 ID の principal が記録と異なれば 403、
+// DEVICE_BINDING=enforce で端末 ID の principal が記録と異なれば 409 (device_binding_mismatch)、
 // オンライン端末数が上限なら 503 を返す (いずれも WS へ昇格する前)。
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	deviceID := r.Header.Get("X-Device-Id")

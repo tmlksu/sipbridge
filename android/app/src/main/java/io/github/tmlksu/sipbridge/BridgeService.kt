@@ -100,6 +100,9 @@ class BridgeService : Service(), RelayClient.Listener {
 
         /** wake lock を取り直す間隔 ([WAKE_LOCK_TIMEOUT_MS] より十分短くする)。 */
         private const val WAKE_LOCK_RENEW_MS = 50 * 60 * 1000L
+        /** 設定が一時的に読めないときの sip_account 送信の再試行 (#42 の一時障害中)。 */
+        private const val SIP_ACCOUNT_RETRY_MS = 3_000L
+        private const val SIP_ACCOUNT_MAX_RETRIES = 10
 
         /** 橋渡し wake lock ([holdWakeBridge]) の上限。サービスが自分のロックを取った時点で
          *  早めに放すが、起動に失敗したときもこの時間で必ず切れる。 */
@@ -826,6 +829,38 @@ class BridgeService : Service(), RelayClient.Listener {
     /** 常駐通知の静音フラグ (通話中ピル代替の通知にも適用)。 */
     private fun serviceQuiet(): Boolean = BridgeConfig.load(this).serviceNotificationQuiet
 
+    /** 設定が一時的に読めず sip_account を保留した回数 (接続ごとに onHello でリセット)。 */
+    @Volatile private var sipAccountRetries = 0
+    private val sipAccountRetry = Runnable { trySendSipAccount() }
+
+    /**
+     * この接続でまだなら sip_account を送る。設定が一時的に読めない (#42) ときは
+     * 送信済みにせず、数秒後に読み直す (既定値の空 sipUser で「送らない」と確定させない)。
+     * 接続が切れれば onDisconnected / connectFresh がフラグを戻すので、再試行は
+     * 接続中のときだけ送る。
+     */
+    private fun trySendSipAccount() {
+        if (sipAccountSent) return
+        if (client?.isConnected() != true) return
+        val cfg = BridgeConfig.loadOrNull(this)
+        if (cfg == null) {
+            if (sipAccountRetries++ < SIP_ACCOUNT_MAX_RETRIES) {
+                Log.w(TAG, "設定を読めないため sip_account を保留 (retry=$sipAccountRetries)")
+                mainHandler.removeCallbacks(sipAccountRetry)
+                mainHandler.postDelayed(sipAccountRetry, SIP_ACCOUNT_RETRY_MS)
+            }
+            return
+        }
+        synchronized(this) {
+            if (sipAccountSent) return
+            sipAccountSent = true
+        }
+        if (cfg.sipUser.isNotBlank()) {
+            Log.i(TAG, "send sip_account user=${LogRedact.id(cfg.sipUser)}")
+            client?.sendSipAccount(cfg.sipUser, cfg.sipPassword, cfg.sipDisplay)
+        }
+    }
+
     // ---- RelayClient.Listener (OkHttp スレッドで呼ばれる) ----
 
     override fun onHello(v: RelayProtocol.Hello) {
@@ -835,14 +870,8 @@ class BridgeService : Service(), RelayClient.Listener {
         CallHub.registered = v.registered
         // 接続ごとの最初の hello でのみ、設定済みなら sip_account を送る。
         // relay は受理後に改めて hello を送るが、その 2 回目では送らない。
-        if (!sipAccountSent) {
-            sipAccountSent = true
-            val cfg = BridgeConfig.load(this)
-            if (cfg.sipUser.isNotBlank()) {
-                Log.i(TAG, "send sip_account user=${LogRedact.id(cfg.sipUser)}")
-                client?.sendSipAccount(cfg.sipUser, cfg.sipPassword, cfg.sipDisplay)
-            }
-        }
+        sipAccountRetries = 0
+        trySendSipAccount()
         // 最初の hello を処理した (sip_account 送信の後)。これ以降の dial はすぐ送ってよい。
         helloProcessed = true
         // §6.2 到達性の記録: hello 到達 = relay 到達。
