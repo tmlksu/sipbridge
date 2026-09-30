@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- debug ビルド用の通信の安全設定。main の同名ファイルを上書きする (#43)。
+     release と同じく平文は禁止・信頼するのは OS 標準の CA のみだが、
+     adb reverse でのローカル結合試験 (ws://127.0.0.1:18080 など) のため
+     ループバック宛てだけ平文を許可する。LAN 内の IP などへの ws:// は debug でも不可。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

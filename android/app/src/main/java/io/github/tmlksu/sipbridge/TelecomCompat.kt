@@ -180,11 +180,72 @@ object TelecomCompat {
     }
 
     /**
-     * 発信番号の取り出し (純関数)。番号は加工しない。
-     * `tel:` なら schemeSpecificPart、`sip:` なら `@` の前、その他はそのまま。
+     * Telecom の発信先 [uri] から番号を取り出す (#32)。
+     * `Uri.toString()` は percent-encode されたまま (`tel:%2B81…`, `tel:*67%23`) なので使わず、
+     * decode 済みの [Uri.getSchemeSpecificPart] を [numberFromParts] に渡す。
+     */
+    fun numberFrom(uri: Uri?): String =
+        if (uri == null) "" else numberFromParts(uri.scheme, uri.schemeSpecificPart, uri.fragment)
+
+    /**
+     * 発信番号の取り出し (純関数)。[ssp] は percent-decode 済みの scheme-specific part。
+     * 番号そのものは加工しない (区切り文字の除去などは relay 側の検証に任せる)。
+     * - `tel:` → `;` より前 (RFC 3966 の `;phone-context=` などのパラメータは落とす)
+     * - `sip:` / `sips:` → user 部のみ (`@` より前、さらに `;` のユーザーパラメータより前)
+     * - その他 → `@` より前 (従来どおり)
+     *
+     * [fragment] は `Uri.parse("tel:*67#")` のように `#` が生のまま入った URI で、
+     * `#` 以降がフラグメントとして切り離された分 (空文字もあり得る)。null でなければ
+     * `ssp + "#" + fragment` として番号に戻す (`#` を含む特番を壊さない)。
+     */
+    fun numberFromParts(scheme: String?, ssp: String?, fragment: String? = null): String {
+        val s = if (fragment != null) ssp.orEmpty() + "#" + fragment else ssp.orEmpty()
+        return when (scheme?.lowercase()) {
+            "tel" -> s.substringBefore(";")
+            "sip", "sips" -> s.substringBefore("@").substringBefore(";")
+            else -> s.substringBefore("@")
+        }
+    }
+
+    /**
+     * 文字列の URI から番号を取り出す (純関数。JVM テスト・互換用)。
+     * scheme-specific part を percent-decode してから [numberFromParts] と同じ規則で切り出す。
+     * スキームが無ければ (`2104`) decode だけしてそのまま返す。
      */
     fun numberFrom(uri: String): String {
-        val s = uri.substringAfter(":")
-        return s.substringBefore("@")
+        val i = uri.indexOf(':')
+        if (i < 0) return percentDecode(uri).substringBefore("@")
+        return numberFromParts(uri.substring(0, i), percentDecode(uri.substring(i + 1)))
+    }
+
+    /**
+     * `%XX` を UTF-8 として decode する ([Uri.decode] 相当の純関数)。
+     * `+` は空白にしない (国際番号の `+` を壊さない)。不正な `%` はそのまま残す。
+     */
+    internal fun percentDecode(s: String): String {
+        if (!s.contains('%')) return s
+        val sb = StringBuilder(s.length)
+        val bytes = java.io.ByteArrayOutputStream()
+        fun flush() {
+            if (bytes.size() > 0) {
+                sb.append(bytes.toString(Charsets.UTF_8.name()))
+                bytes.reset()
+            }
+        }
+        var i = 0
+        while (i < s.length) {
+            val hi = if (s[i] == '%' && i + 2 < s.length) s[i + 1].digitToIntOrNull(16) else null
+            val lo = if (hi != null) s[i + 2].digitToIntOrNull(16) else null
+            if (hi != null && lo != null) {
+                bytes.write(hi * 16 + lo)
+                i += 3
+            } else {
+                flush()
+                sb.append(s[i])
+                i++
+            }
+        }
+        flush()
+        return sb.toString()
     }
 }

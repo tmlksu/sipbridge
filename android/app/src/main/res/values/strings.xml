@@ -159,6 +159,12 @@
     <string name="settings_missing_access_secret">Access Secret</string>
     <string name="settings_err_start_missing">開始できません。%1$s を入力してください</string>
     <string name="settings_err_url_invalid">relay URL が不正です</string>
+    <string name="settings_err_url_cleartext">平文の ws:// / http:// は使えません (端末内の 127.0.0.1 / localhost 宛てのみ可)。wss:// で入力してください。保存していません</string>
+    <string name="settings_err_url_cleartext_release">平文の ws:// / http:// は使えません。wss:// で入力してください。保存していません</string>
+    <string name="settings_err_saved_url_cleartext">保存済みの relay URL は平文 (ws:// / http://) のため接続しません。wss:// に変更してください</string>
+    <string name="settings_warn_config_reset">保存していた設定を復号できなかったため初期化しました。再設定してください</string>
+    <string name="settings_warn_plain_storage">この端末では設定を暗号化して保存できないため、パスワード類を暗号化せずに保存しています</string>
+    <string name="settings_warn_storage_unavailable">設定の保存領域に一時的にアクセスできません。しばらくしてから再度お試しください</string>
     <string name="settings_saved_restart">設定を保存し Bridge を再接続しました (%1$s)</string>
     <string name="settings_start">Bridge 接続開始</string>
     <string name="settings_perm_overlay_ok">オーバーレイ許可済み</string>
@@ -201,6 +207,8 @@
     <string name="error_account_password_mismatch">内線のパスワードが relay の登録済み値と一致しません</string>
     <string name="error_account_failed">SIP アカウントの登録に失敗しました: %1$s</string>
     <string name="error_other">エラー (%1$s): %2$s</string>
+    <string name="status_config_unavailable">設定を一時的に読み込めません。しばらくして再試行します</string>
+    <string name="error_cleartext">relay への平文 (ws://) 接続は端末のセキュリティ設定で禁止されています。relay URL を wss:// にしてください</string>
     <string name="outgoing_failed_dial">発信できませんでした: %1$s</string>
     <string name="outgoing_failed_timeout">発信できませんでした (相手からの応答がありません)</string>
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通信の安全設定 (#43)。release / probe はこのファイル、debug は
+     src/debug/res/xml/network_security_config.xml (同名リソース) で上書きされる。
+     - 平文通信 (ws:// / http://) は一切許可しない。relay は wss:// のみ。
+     - 信頼する CA は OS 標準 (system) のみ。ユーザーが追加した CA は信頼しない
+       (端末に入れられた CA による中間者で Access トークン・SIP パスワードを抜かれないため)。
+     - 証明書のピンニングはしない (#44)。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

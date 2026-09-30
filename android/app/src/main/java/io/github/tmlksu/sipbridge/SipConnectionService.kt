@@ -59,10 +59,10 @@ class SipConnectionService : ConnectionService() {
     override fun onCreateOutgoingConnection(
         handle: PhoneAccountHandle?, request: ConnectionRequest?
     ): Connection {
-        // 番号は加工しない。tel: なら schemeSpecificPart、sip: なら @ の前を取る。
-        val raw = request?.address?.toString().orEmpty()
-        val to = TelecomCompat.numberFrom(raw)
-        Log.i(TAG, "onCreateOutgoingConnection accountId=${handle?.id} to=$to")
+        // 番号は加工しない。tel: なら schemeSpecificPart、sip: なら user 部を取る。
+        // toString() は percent-encode されたまま (%2B81…, *67%23) なので Uri のまま渡す (#32)。
+        val to = TelecomCompat.numberFrom(request?.address)
+        Log.i(TAG, "onCreateOutgoingConnection accountId=${handle?.id} to=${LogRedact.id(to)}")
         val c = newConnection(handle, request)
         // アプリ起点 (dialFromAnywhere → placeCall) かを extras で見分ける。
         // placeCall 時に EXTRA_OUTGOING_CALL_EXTRAS の下に入れた EXTRA_FROM_APP は、
@@ -114,7 +114,7 @@ class SipConnectionService : ConnectionService() {
         handle: PhoneAccountHandle?, request: ConnectionRequest?
     ): SipConnection {
         val c = SipConnection(applicationContext)
-        val number = TelecomCompat.numberFrom(request?.address?.toString().orEmpty())
+        val number = TelecomCompat.numberFrom(request?.address)
         val display = CallHub.display.ifBlank { number }
         runCatching {
             c.setAddress(
