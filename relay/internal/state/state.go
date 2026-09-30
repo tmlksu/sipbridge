@@ -180,6 +180,10 @@ func (s *Store) SetAccount(user string, a Account) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 変化が無ければ書かない (R2S は microSD なので無駄な書き込みを避ける)。
+	if cur, ok := s.accounts[user]; ok && cur == a {
+		return nil
+	}
 	s.accounts[user] = a
 	return s.saveLocked()
 }
@@ -291,6 +295,9 @@ func (s *Store) SetDevicePush(deviceID string, p Push) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.devices[deviceID]
+	if d.Push != nil && *d.Push == p {
+		return nil
+	}
 	cp := p
 	d.Push = &cp
 	s.devices[deviceID] = d
