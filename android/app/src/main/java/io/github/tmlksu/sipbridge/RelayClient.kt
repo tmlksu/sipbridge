@@ -64,6 +64,16 @@ class RelayClient(
 
     companion object {
         private const val TAG = "RelayClient"
+
+        /** [Listener.onError] の code: 平文通信が network_security_config で禁止された (#43)。 */
+        const val ERROR_CLEARTEXT = "cleartext"
+
+        /**
+         * OkHttp が network security policy で平文を拒否したときの例外か
+         * (`UnknownServiceException: CLEARTEXT communication to <host> not permitted ...`)。
+         */
+        fun isCleartextBlocked(t: Throwable): Boolean =
+            t is java.net.UnknownServiceException && t.message?.contains("CLEARTEXT") == true
         private const val MAX_BACKOFF_SEC = 30L
         /**
          * OkHttp の client→server WS ping 周期 (#25)。
@@ -328,8 +338,11 @@ class RelayClient(
             normalizeRelayUrl(relayUrl)
         } catch (e: Exception) {
             Log.w(TAG, "bad relay URL: ${e.message}")
-            listener.onError("config", "relay URL が不正です: ${e.message}")
-            scheduleReconnect()
+            // 平文の非ループバック宛て (#43) もここに来る。メッセージは checkRelayUrl の理由。
+            // URL はこのインスタンスで固定なので、再試行しても通らない。バックオフ再接続は
+            // 予約せず、設定変更 (BridgeService の再起動で新しい RelayClient になる) を待つ。
+            // 網切替・push 起床などで connect() が呼ばれたときは再度ここで止まる。
+            listener.onError("config", e.message ?: "relay URL が不正です")
             return
         }
         val req = Request.Builder().url(url)
@@ -344,7 +357,7 @@ class RelayClient(
                 }
             }
             .build()
-        Log.i(TAG, "connecting to $url")
+        Log.i(TAG, "connecting to ${LogRedact.relayUrl(url)}")
         synchronized(lock) {
             // ロックを外していた間に他経路が接続を開始していないか再確認する。
             // newWebSocket と pending への代入をロック内で行うことで、OkHttp スレッドの
@@ -373,7 +386,8 @@ class RelayClient(
             val msg = try {
                 RelayProtocol.parseRelayMessage(text)
             } catch (e: Exception) {
-                Log.w(TAG, "parse fail: ${e.message}")
+                // 例外メッセージには受信 JSON の断片 (番号など) が入り得るため、release はクラス名だけ。
+                Log.w(TAG, "parse fail: ${if (BuildConfig.DEBUG) e.message else e.javaClass.simpleName}")
                 return
             }
             when (msg) {
@@ -406,6 +420,10 @@ class RelayClient(
             Log.w(TAG, "failure: ${t.message} http=${response?.code}")
             if (response?.code == 401 || response?.code == 403) {
                 listener.onError("auth", "認証失敗 (${response.code}): Access トークン/Dev Token を確認してください")
+            } else if (isCleartextBlocked(t)) {
+                // network_security_config で平文が禁止されている (#43)。再試行しても通らないので
+                // 状態表示で理由が分かるようにする (再接続のバックオフはそのまま続く)。
+                listener.onError(ERROR_CLEARTEXT, t.message.orEmpty())
             }
             onLost(webSocket)
         }

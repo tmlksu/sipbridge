@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 30 以下向けのバックアップ除外 (#48)。allowBackup="false" で既に止まっているが、
+     将来 allowBackup を変えても認証情報が出ていかないよう全 domain を除外しておく。
+     API 31+ は data_extraction_rules.xml が使われる。 -->
+<full-backup-content>
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>

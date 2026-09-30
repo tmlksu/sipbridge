@@ -88,6 +88,9 @@ API 34+ (S25) の注意
 気づき:
 - 端末側 TCP 8080 は旧 EchoSIP が使用中 → テストは 18080 を使用。
 - debug APK に平文 ws:// 許可を追加 (`app/src/debug/AndroidManifest.xml`)。
+  (注: 現在は usesCleartextTraffic ではなく `app/src/debug/res/xml/network_security_config.xml` で
+  ループバック (127.0.0.1 / localhost) 宛てのみ平文を許可している。LAN 内 IP への ws:// は debug でも不可、
+  release は平文を全面禁止。#43)
 - `extensions.conf` の sed 編集は `&` 展開で破損するため手動/python3 推奨 (§1.4)。
 
 ### 2026-09-16 (本番経路 `wss://relay.example.com` + Access / Echo Show 5 .133 単端末)

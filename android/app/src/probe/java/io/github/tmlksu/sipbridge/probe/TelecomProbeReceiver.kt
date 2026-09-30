@@ -6,10 +6,15 @@ import android.content.Intent
 import android.util.Log
 
 /**
- * [TelecomProbe] の adb 操作口 (debug ビルド専用)。
+ * [TelecomProbe] の adb 操作口 (probe ビルド専用)。
  *
+ * manifest で `android:permission="android.permission.DUMP"` により保護している。
+ * DUMP は第三者アプリが取得できないため、**adb shell (uid 2000) からのみ**届く。
+ * probe ビルドの applicationId は `io.github.tmlksu.sipbridge.probe` なので、
+ * コンポーネントは明示 (`-n`) で次のように指定する:
  * ```
- * adb shell am broadcast -n io.github.tmlksu.sipbridge/.probe.TelecomProbeReceiver \
+ * adb shell am broadcast \
+ *   -n io.github.tmlksu.sipbridge.probe/io.github.tmlksu.sipbridge.probe.TelecomProbeReceiver \
  *   -a io.github.tmlksu.sipbridge.PROBE --es cmd register --es mode managed
  * ```
  * cmd: register | unregister | status | incoming | outgoing | expect | hangup

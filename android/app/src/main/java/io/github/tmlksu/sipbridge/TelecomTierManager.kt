@@ -83,10 +83,10 @@ object TelecomTierManager {
     fun recordDegrade(ctx: Context, from: CallTier, to: CallTier, reason: String) {
         runCatching {
             Log.i(TAG, "degrade $from -> $to ($reason)")
-            val cfg = BridgeConfig.load(ctx)
+            // 読込→変換→書込を原子的に行う。設定が一時的に読めないとき (#42) は何も書かない。
             // ordinal: MANAGED(0) < SELF_MANAGED(1) < LEGACY(2)。下がる方向だけ記録する。
-            if (to.ordinal > cfg.telecomMaxTier.ordinal) {
-                BridgeConfig.save(ctx, cfg.copy(telecomMaxTier = to))
+            BridgeConfig.update(ctx) { cfg ->
+                if (to.ordinal > cfg.telecomMaxTier.ordinal) cfg.copy(telecomMaxTier = to) else cfg
             }
         }.onFailure { Log.w(TAG, "recordDegrade failed", it) }
     }
@@ -112,16 +112,14 @@ object TelecomTierManager {
             val current =
                 "${BuildConfig.VERSION_CODE}/${Build.VERSION.SDK_INT}/" +
                     "${Build.FINGERPRINT.hashCode()}/$caps"
-            val cfg = BridgeConfig.load(ctx)
-            if (cfg.telecomEnvFingerprint != current) {
-                Log.i(TAG, "environment changed, reset learned tier")
-                BridgeConfig.save(
-                    ctx,
-                    cfg.copy(
-                        telecomMaxTier = CallTier.MANAGED,
-                        telecomEnvFingerprint = current
-                    )
-                )
+            // 読込→変換→書込を原子的に行う。設定が一時的に読めないとき (#42) は次回に回す。
+            BridgeConfig.update(ctx) { cfg ->
+                if (cfg.telecomEnvFingerprint != current) {
+                    Log.i(TAG, "environment changed, reset learned tier")
+                    cfg.copy(telecomMaxTier = CallTier.MANAGED, telecomEnvFingerprint = current)
+                } else {
+                    cfg
+                }
             }
         }.onFailure { Log.w(TAG, "resetIfEnvironmentChanged failed", it) }
     }

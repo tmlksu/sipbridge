@@ -38,6 +38,13 @@ class BridgeService : Service(), RelayClient.Listener {
 
     companion object {
         private const val TAG = "BridgeService"
+        /** 設定が一時的に読めなかったときの読み直し間隔 (BridgeConfig の cooldown より長く)。 */
+        private const val CONFIG_RETRY_MS = BridgeConfig.TRANSIENT_COOLDOWN_MS + 5_000L
+        /** 起床要求 (FCM 着信・発信) 中に設定が一時的に読めなかったときの読み直し間隔と期限。 */
+        private const val WAKE_RETRY_INTERVAL_MS = 2_500L
+        private const val WAKE_PENDING_WINDOW_MS = 8_000L
+        /** BootReceiver が autostart を確かめられないまま起動したことを示す extra (#42)。 */
+        const val EXTRA_FROM_BOOT_UNVERIFIED = "sipbridge.fromBootUnverified"
         const val ACT_ANSWER = "sipbridge.ANSWER"
         const val ACT_REJECT = "sipbridge.REJECT"
         const val ACT_HANGUP = "sipbridge.HANGUP"
@@ -148,6 +155,17 @@ class BridgeService : Service(), RelayClient.Listener {
             else ctx.startService(i)
         }
 
+        /**
+         * 起動時 (BootReceiver) に設定を読めず autostart を確かめられなかったときの起動 (#42)。
+         * サービスは設定を読めた時点で autostart=false なら自分を止める。
+         */
+        fun startFromBootUnverified(ctx: Context) {
+            // minSdk 29 なので常に startForegroundService (API 26+) を使える。
+            ctx.startForegroundService(
+                Intent(ctx, BridgeService::class.java).putExtra(EXTRA_FROM_BOOT_UNVERIFIED, true)
+            )
+        }
+
         /** §6.3 手順 1 用の起動 ([ACT_REREGISTER_PUSH] を付けて起こす)。 */
         fun startReregister(ctx: Context) {
             // アラームのブロードキャストを抜けてから接続を始めるまで眠らないように。
@@ -184,6 +202,19 @@ class BridgeService : Service(), RelayClient.Listener {
     /** 全画面着信UIが前面にある間は通知・バブルを出さない (二重表示防止) */
     @Volatile private var uiVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
+    /** 設定が一時的に読めなかったときの読み直し (#42)。onDestroy の removeCallbacksAndMessages で止まる。 */
+    private val retryEnsureClient = Runnable { if (running && client == null) ensureClient() }
+    /**
+     * 起床要求 (FCM 着信・発信・接続要求) の最中に設定が一時的に読めず、client もまだ無いときの
+     * 保留期限 (elapsedRealtime)。0 = 保留なし。期限内は [WAKE_RETRY_INTERVAL_MS] ごとに
+     * cooldown を無視して読み直す (#42: 着信の取りこぼし防止)。
+     */
+    private var wakePendingUntil = 0L
+    private val wakeRetry = Runnable { retryPendingWake() }
+    /** 最後に読めた設定のモード (設定が一時的に読めないときの PUSH 切断予約用)。 */
+    @Volatile private var lastKnownMode: BridgeMode? = null
+    /** BootReceiver が autostart を確かめられずに起動した。設定を読めたら確かめる (#42)。 */
+    private var bootAutostartUnverified = false
     @Volatile private var pushDisconnectRunnable: Runnable? = null
     /** 未接続状態で発信要求されたとき、hello 受信後に送る発信先。 */
     @Volatile private var pendingDial: String? = null
@@ -319,7 +350,7 @@ class BridgeService : Service(), RelayClient.Listener {
         // 計算した直後に main が onDestroy / idle 切断で解放し、その後に取り直して
         // wakeLockRenew が生き残る競合がある (Fable レビュー #2)。
         synchronized(powerLockGuard) {
-            mode = BridgeConfig.load(this).mode
+            mode = currentMode()
             callIdle = CallHub.state == CallHub.State.IDLE
             wanted = connectionWanted
             hold = running && PowerLockPolicy.shouldHold(mode, callIdle, wanted)
@@ -431,7 +462,19 @@ class BridgeService : Service(), RelayClient.Listener {
 
     /** 設定を読み、PERSISTENT なら接続、PUSH なら待機する。 */
     private fun ensureClient() {
-        val cfg = BridgeConfig.load(this)
+        mainHandler.removeCallbacks(retryEnsureClient)
+        val cfg = BridgeConfig.loadOrNull(this)
+        if (cfg == null) {
+            // 設定の保存領域に一時的にアクセスできない (Keystore の一時障害など, #42)。
+            // 既定値 (relay URL 空) で「未設定」扱いにせず、接続開始を保留して後で読み直す。
+            Log.w(TAG, "config temporarily unavailable; retry in ${CONFIG_RETRY_MS}ms")
+            CallHub.updateStatus(getString(R.string.status_config_unavailable))
+            updateServiceNote()
+            mainHandler.postDelayed(retryEnsureClient, CONFIG_RETRY_MS)
+            return
+        }
+        lastKnownMode = cfg.mode
+        if (!checkBootAutostart(cfg)) return
         restorePushToken()
         if (cfg.relayUrl.isBlank()) {
             CallHub.updateStatus("未設定: relay URL を入力してください")
@@ -473,38 +516,115 @@ class BridgeService : Service(), RelayClient.Listener {
     }
 
     /** PUSH モードのオンデマンド接続 (発信・FCM 起床用)。 */
-    private fun ensureConnected(): Boolean {
-        val cfg = BridgeConfig.load(this)
-        restorePushToken()
-        if (cfg.relayUrl.isBlank()) {
-            CallHub.updateStatus("未設定: relay URL を入力してください")
-            return false
+    private fun ensureConnected(ignoreConfigCooldown: Boolean = false): Boolean {
+        val cfg = BridgeConfig.loadOrNull(this, ignoreCooldown = ignoreConfigCooldown)
+        if (cfg == null) {
+            // 設定の保存領域に一時的にアクセスできない (#42)。「未設定」とは出さない。
+            CallHub.updateStatus(getString(R.string.status_config_unavailable))
+            if (client == null) {
+                // 接続先が分からない。起床要求を保持して、短い間隔で数回読み直す。
+                holdWakePending()
+                return false
+            }
+            // client は以前読めた設定で作ってある。設定が読めなくてもそのまま接続できる。
+            Log.w(TAG, "config temporarily unavailable; connect with existing client")
+        } else {
+            lastKnownMode = cfg.mode
+            if (!checkBootAutostart(cfg)) return false
+            restorePushToken()
+            if (cfg.relayUrl.isBlank()) {
+                CallHub.updateStatus("未設定: relay URL を入力してください")
+                return false
+            }
+            if (client == null) {
+                client = RelayClient(
+                    relayUrl = cfg.relayUrl,
+                    accessClientId = cfg.accessClientId,
+                    accessClientSecret = cfg.accessClientSecret,
+                    devToken = cfg.devToken,
+                    deviceId = cfg.deviceId,
+                    listener = this,
+                    callActive = { CallHub.state != CallHub.State.IDLE }
+                )
+            }
         }
-        if (client == null) {
-            client = RelayClient(
-                relayUrl = cfg.relayUrl,
-                accessClientId = cfg.accessClientId,
-                accessClientSecret = cfg.accessClientSecret,
-                devToken = cfg.devToken,
-                deviceId = cfg.deviceId,
-                listener = this,
-                callActive = { CallHub.state != CallHub.State.IDLE }
-            )
-        }
+        clearWakePending()
         cancelPushDisconnect()
         // 接続開始より前にロックを取る (FCM 起床・発信・register_push の接続。issue #19)。
         connectionWanted = true
         updatePowerLocks("ensureConnected")
         if (client?.isConnected() != true) {
-            CallHub.updateStatus("接続中… ${cfg.relayUrl}")
+            CallHub.updateStatus("接続中… ${cfg?.relayUrl.orEmpty()}")
             connectFresh()
         }
         // PUSH の接続期限 (hello が来なくてもロックが残り続けないように)。
         // hello・通話終了で 60 秒の idle 切断に積み直される。呼があれば発火時に何もしない。
-        if (cfg.mode == BridgeMode.PUSH && CallHub.state == CallHub.State.IDLE) {
+        if ((cfg?.mode ?: lastKnownMode) == BridgeMode.PUSH && CallHub.state == CallHub.State.IDLE) {
             schedulePushDisconnect(PUSH_CONNECT_DEADLINE_MS)
         }
         return true
+    }
+
+    /**
+     * 現在のモード。設定が一時的に読めない間 (#42) は既定の PERSISTENT ではなく、
+     * このプロセスで最後に読めた値 → sipbridge_meta に写したモード → PERSISTENT の順に使う
+     * (PUSH 端末がロックを放さない・idle 切断を予約しない、を避けるため)。
+     */
+    private fun currentMode(): BridgeMode =
+        BridgeConfig.loadOrNull(this)?.mode?.also { lastKnownMode = it }
+            ?: lastKnownMode
+            ?: BridgeConfig.lastKnownMode(this)
+            ?: BridgeMode.PERSISTENT
+
+    /** 設定が一時的に読めない間の起床要求を保持し、読み直しを予約する (#42)。 */
+    private fun holdWakePending() {
+        val now = SystemClock.elapsedRealtime()
+        if (wakePendingUntil == 0L) {
+            wakePendingUntil = now + WAKE_PENDING_WINDOW_MS
+            // 読み直しの間 CPU を眠らせない (PUSH 待機中はサービスのロックを持っていないため)。
+            connectionWanted = true
+            updatePowerLocks("wakePending")
+        }
+        mainHandler.removeCallbacks(wakeRetry)
+        if (now < wakePendingUntil) {
+            mainHandler.postDelayed(wakeRetry, WAKE_RETRY_INTERVAL_MS)
+        } else {
+            // 期限切れ: 起床要求は諦め、通常の読み直し (ensureClient) に任せる。
+            Log.w(TAG, "wake pending expired: config still unavailable")
+            clearWakePending()
+            if (client == null) {
+                connectionWanted = false
+                updatePowerLocks("wakePendingExpired")
+                mainHandler.removeCallbacks(retryEnsureClient)
+                mainHandler.postDelayed(retryEnsureClient, CONFIG_RETRY_MS)
+            }
+        }
+    }
+
+    private fun retryPendingWake() {
+        if (wakePendingUntil == 0L || !running) return
+        // cooldown を無視して開き直す。失敗したら ensureConnected が holdWakePending で次を予約する。
+        ensureConnected(ignoreConfigCooldown = true)
+    }
+
+    private fun clearWakePending() {
+        wakePendingUntil = 0L
+        mainHandler.removeCallbacks(wakeRetry)
+    }
+
+    /**
+     * BootReceiver が autostart を確かめられずに起動した場合、設定を読めた時点で確かめ、
+     * autostart=false なら自分を止める (#42)。止めたら false。
+     */
+    private fun checkBootAutostart(cfg: BridgeConfigData): Boolean {
+        if (!bootAutostartUnverified) return true
+        bootAutostartUnverified = false
+        if (cfg.autostart) return true
+        Log.i(TAG, "started at boot without verifying autostart; autostart=false, stop")
+        clearWakePending()
+        mainHandler.removeCallbacks(retryEnsureClient)
+        stopSelf()
+        return false
     }
 
     /**
@@ -535,6 +655,11 @@ class BridgeService : Service(), RelayClient.Listener {
     }
 
     private fun handleCommand(intent: Intent?): Int {
+        if (intent?.getBooleanExtra(EXTRA_FROM_BOOT_UNVERIFIED, false) == true) {
+            bootAutostartUnverified = true
+            // onCreate の ensureClient で既に読めていた場合はここで確かめる。
+            BridgeConfig.loadOrNull(this)?.let { if (!checkBootAutostart(it)) return START_NOT_STICKY }
+        }
         when (intent?.action) {
             ACT_ANSWER -> answerFromAnywhere()
             ACT_REJECT -> rejectFromAnywhere()
@@ -544,7 +669,7 @@ class BridgeService : Service(), RelayClient.Listener {
             ACT_REREGISTER_PUSH -> {
                 // PUSH モードのときだけ、登録済みトークンを捨てて接続し直す (register_push 再送)。
                 // PERSISTENT は何もしない。再登録のためだけの接続は既存の idle 猶予で自動切断される。
-                if (BridgeConfig.load(this).mode == BridgeMode.PUSH) {
+                if (currentMode() == BridgeMode.PUSH) {
                     registeredPushToken = null
                     restorePushToken()
                     ensureConnected()
@@ -587,7 +712,7 @@ class BridgeService : Service(), RelayClient.Listener {
             null -> {
                 // 通常起動: PERSISTENT なら接続を確保する
                 if (client == null) ensureClient()
-                else if (BridgeConfig.load(this).mode == BridgeMode.PERSISTENT) ensureConnected()
+                else if (currentMode() == BridgeMode.PERSISTENT) ensureConnected()
                 // PUSH: サービスが生きている状態で未登録のトークンが届いた場合
                 // (GmsApplication の取得完了がサービス起動より遅れたとき) も登録のため接続する。
                 else if (restorePushToken() != null) ensureConnected()
@@ -714,7 +839,7 @@ class BridgeService : Service(), RelayClient.Listener {
             sipAccountSent = true
             val cfg = BridgeConfig.load(this)
             if (cfg.sipUser.isNotBlank()) {
-                Log.i(TAG, "send sip_account user=${cfg.sipUser}")
+                Log.i(TAG, "send sip_account user=${LogRedact.id(cfg.sipUser)}")
                 client?.sendSipAccount(cfg.sipUser, cfg.sipPassword, cfg.sipDisplay)
             }
         }
@@ -941,6 +1066,7 @@ class BridgeService : Service(), RelayClient.Listener {
             "account_password_mismatch" -> getString(R.string.error_account_password_mismatch)
             "account_failed" -> getString(R.string.error_account_failed, message)
             "dial_failed" -> getString(R.string.outgoing_failed_dial, message)
+            RelayClient.ERROR_CLEARTEXT -> getString(R.string.error_cleartext)
             else -> getString(R.string.error_other, code, message)
         }
         if (OutgoingCallPolicy.shouldFailOutgoingOnError(
@@ -963,7 +1089,7 @@ class BridgeService : Service(), RelayClient.Listener {
      * 改めて試す。通話中は触らない (resume の再接続を妨げない)。main スレッドで呼ぶ。
      */
     private fun stopPushOnAuthError() {
-        if (BridgeConfig.load(this).mode != BridgeMode.PUSH) return
+        if (currentMode() != BridgeMode.PUSH) return
         if (CallHub.state != CallHub.State.IDLE) return
         Log.i(TAG, "PUSH auth error, disconnect")
         cancelPushDisconnect()
@@ -1016,7 +1142,7 @@ class BridgeService : Service(), RelayClient.Listener {
         incomingStartedAt = System.currentTimeMillis()
         CallHub.session = RelayCallSession(callId, from, CallHub.display, pt, canAnswer = true)
         CallHub.notifyChanged()
-        Log.i(TAG, "incoming from $from ($callId)")
+        Log.i(TAG, "incoming from ${LogRedact.id(from)} ($callId)")
         uiVisible = false
         val tier = TelecomTierManager.decide(this, incoming = true)
         if (tier != CallTier.LEGACY) {
@@ -1689,7 +1815,7 @@ class BridgeService : Service(), RelayClient.Listener {
                     CallHub.outgoing, CallHub.state == CallHub.State.RINGING, CallHub.callId.isNotBlank()
                 )
             ) {
-                Log.w(TAG, "発信ウォッチドッグ: 30 秒経っても callId が付かないため終了 dest=$dest")
+                Log.w(TAG, "発信ウォッチドッグ: 30 秒経っても callId が付かないため終了 dest=${LogRedact.id(dest)}")
                 finishCall(CallHub.callId, getString(R.string.outgoing_failed_timeout), DisconnectCause.ERROR)
             }
         }
@@ -1705,12 +1831,12 @@ class BridgeService : Service(), RelayClient.Listener {
     }
 
     private fun schedulePushDisconnect(delayMs: Long = PUSH_IDLE_DISCONNECT_MS) {
-        if (BridgeConfig.load(this).mode != BridgeMode.PUSH) return
+        if (currentMode() != BridgeMode.PUSH) return
         if (CallHub.state != CallHub.State.IDLE) return
         cancelPushDisconnect()
         val r = Runnable {
             pushDisconnectRunnable = null
-            if (BridgeConfig.load(this).mode == BridgeMode.PUSH && CallHub.state == CallHub.State.IDLE) {
+            if (currentMode() == BridgeMode.PUSH && CallHub.state == CallHub.State.IDLE) {
                 Log.i(TAG, "PUSH idle timeout (${delayMs}ms), disconnect")
                 client?.disconnect()
                 connectionWanted = false
