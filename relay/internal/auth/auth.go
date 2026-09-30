@@ -1,6 +1,6 @@
 // Package auth は WebSocket 接続前の HTTP 認証を行う。
 // AUTH_MODE=token では開発用共有トークン、cf-access では
-// Cloudflare Access の JWT (RS256, JWKS 検証, aud/exp 検証) を使う。
+// Cloudflare Access の JWT (RS256, JWKS 検証, aud/iss/exp 検証) を使う。
 package auth
 
 import (
@@ -19,8 +19,12 @@ import (
 )
 
 // Authenticator は HTTP リクエストを認証する。
+//
+// Authenticate は認証主体 (principal) を返す。cf-access では JWT の sub
+// (ユーザー認証の user ID)、sub が空なら common_name (Service Token の
+// Client ID)。token モードは主体を区別できないので空を返す。
 type Authenticator interface {
-	Authenticate(r *http.Request) error
+	Authenticate(r *http.Request) (principal string, err error)
 	Mode() string
 }
 
@@ -39,18 +43,18 @@ func NewTokenAuth(token string) *TokenAuth {
 // Mode は "token" を返す。
 func (a *TokenAuth) Mode() string { return "token" }
 
-// Authenticate は Bearer トークンが一致すれば nil を返す。
-func (a *TokenAuth) Authenticate(r *http.Request) error {
+// Authenticate は Bearer トークンが一致すれば nil を返す (principal は常に空)。
+func (a *TokenAuth) Authenticate(r *http.Request) (string, error) {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(h, prefix) {
-		return fmt.Errorf("Authorization: Bearer トークンが必要")
+		return "", fmt.Errorf("Authorization: Bearer トークンが必要")
 	}
 	got := strings.TrimPrefix(h, prefix)
 	if subtle.ConstantTimeCompare([]byte(got), []byte(a.Token)) != 1 {
-		return fmt.Errorf("トークンが不一致")
+		return "", fmt.Errorf("トークンが不一致")
 	}
-	return nil
+	return "", nil
 }
 
 // ---- Cloudflare Access JWT ----
@@ -99,6 +103,7 @@ func (k jwk) rsaPublicKey() (*rsa.PublicKey, error) {
 type CFAccessAuth struct {
 	jwksURL string
 	aud     string
+	issuer  string // "https://<team>" (JWT の iss と完全一致を要求する)
 
 	mu        sync.Mutex
 	keys      map[string]*rsa.PublicKey // kid → 公開鍵
@@ -109,14 +114,17 @@ type CFAccessAuth struct {
 	fetch     func(url string) (map[string]*rsa.PublicKey, error) // 差し替え可能 (テスト用)
 }
 
-// NewCFAccessAuth はチームドメインと AUD から作る。
+// NewCFAccessAuth はチームドメインと AUD から作る。teamDomain はスキーム無しの
+// 正規化済みの値 (例 "example.cloudflareaccess.com"。config.NormalizeTeamDomain)。
+// JWKS は https://<team>/cdn-cgi/access/certs から取り、iss は https://<team> を要求する。
 func NewCFAccessAuth(teamDomain, aud string) *CFAccessAuth {
-	return NewCFAccessAuthWithURL("https://"+teamDomain+jwksURLPath, aud)
+	base := "https://" + teamDomain
+	return NewCFAccessAuthWithURL(base+jwksURLPath, aud, base)
 }
 
-// NewCFAccessAuthWithURL は JWKS URL を直接指定する (テスト用)。
-func NewCFAccessAuthWithURL(jwksURL, aud string) *CFAccessAuth {
-	a := &CFAccessAuth{jwksURL: jwksURL, aud: aud, ttl: 10 * time.Minute}
+// NewCFAccessAuthWithURL は JWKS URL と期待する iss を直接指定する (テスト用)。
+func NewCFAccessAuthWithURL(jwksURL, aud, issuer string) *CFAccessAuth {
+	a := &CFAccessAuth{jwksURL: jwksURL, aud: aud, issuer: issuer, ttl: 10 * time.Minute}
 	a.fetch = fetchJWKS
 	return a
 }
@@ -124,17 +132,19 @@ func NewCFAccessAuthWithURL(jwksURL, aud string) *CFAccessAuth {
 // Mode は "cf-access" を返す。
 func (a *CFAccessAuth) Mode() string { return "cf-access" }
 
-// Authenticate は Cf-Access-Jwt-Assertion を検証する。
-func (a *CFAccessAuth) Authenticate(r *http.Request) error {
+// Authenticate は Cf-Access-Jwt-Assertion を検証し、principal を返す。
+// 署名 (RS256 のみ)・aud・iss (https://<team>)・exp (必須) を検証する。
+func (a *CFAccessAuth) Authenticate(r *http.Request) (string, error) {
 	raw := r.Header.Get("Cf-Access-Jwt-Assertion")
 	if raw == "" {
-		return fmt.Errorf("Cf-Access-Jwt-Assertion ヘッダが必要")
+		return "", fmt.Errorf("Cf-Access-Jwt-Assertion ヘッダが必要")
 	}
 	keys, err := a.cachedKeys()
 	if err != nil {
-		return err
+		return "", err
 	}
-	tok, err := jwt.Parse(raw, func(t *jwt.Token) (any, error) {
+	claims := jwt.MapClaims{}
+	tok, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
 		if t.Method.Alg() != jwt.SigningMethodRS256.Alg() {
 			return nil, fmt.Errorf("想定外の署名方式 %q", t.Method.Alg())
 		}
@@ -144,14 +154,34 @@ func (a *CFAccessAuth) Authenticate(r *http.Request) error {
 			return nil, fmt.Errorf("未知の kid %q", kid)
 		}
 		return pub, nil
-	}, jwt.WithAudience(a.aud))
+	},
+		jwt.WithAudience(a.aud),
+		jwt.WithIssuer(a.issuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}),
+	)
 	if err != nil {
-		return fmt.Errorf("JWT 検証失敗: %w", err)
+		return "", fmt.Errorf("JWT 検証失敗: %w", err)
 	}
 	if !tok.Valid {
-		return fmt.Errorf("JWT が無効")
+		return "", fmt.Errorf("JWT が無効")
 	}
-	return nil
+	return principalFromClaims(claims), nil
+}
+
+// principalFromClaims は認証主体を取り出す。ユーザー認証 (IdP ログイン) の JWT は
+// sub に user ID を持つ。Service Token の JWT は sub が空で common_name に
+// Client ID を持つ。由来を区別するため "sub:<user ID>" / "cn:<Client ID>" の
+// 形で返す (値の取り違えで別種の主体と一致しないように)。どちらも無ければ空
+// (cf-access + DEVICE_BINDING=enforce では接続を拒否する)。
+func principalFromClaims(c jwt.MapClaims) string {
+	if sub, _ := c["sub"].(string); sub != "" {
+		return "sub:" + sub
+	}
+	if cn, _ := c["common_name"].(string); cn != "" {
+		return "cn:" + cn
+	}
+	return ""
 }
 
 // cachedKeys は JWKS を ttl の間キャッシュして返す。

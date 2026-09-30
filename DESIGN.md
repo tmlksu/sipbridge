@@ -70,11 +70,14 @@ Android app (`android/`, EchoSIP から派生)
 |---|---|
 | アプリ → Cloudflare Edge | TLS 1.3 (WSS)。Access Service Token (端末ごとに発行・失効可) |
 | Edge → relay | cloudflared のアウトバウンド QUIC トンネル。relay は `127.0.0.1:8080` のみ LISTEN |
-| relay 内 | `Cf-Access-Jwt-Assertion` を JWKS で再検証 (aud 一致必須)。Access を素通りしても入れない |
+| relay 内 | `Cf-Access-Jwt-Assertion` を JWKS で再検証 (RS256・aud・iss・exp 必須)。Access を素通りしても入れない。端末 ID と認証主体の TOFU 結び付け (`DEVICE_BINDING`)、sip_account の試行制限・上限 |
 | relay → Asterisk | LAN。v1 は UDP。v2 で pjsip `transport-tls` + SRTP (relay 側実装は sipgo + pion/srtp) |
 | 音声の E2E | Cloudflare Edge で TLS が終端するため **Cloudflare は音声を復号できる**。気になる場合は v2 で WS フレームを端末⇄relay の PSK (AES-GCM) で追加暗号化 |
 
 端末側で LISTEN するポートはゼロ。Asterisk の 5060/RTP はインターネットから見えない。
+
+信頼境界・秘匿情報の所在と権限・Service Token 漏洩時の影響・端末紛失時の失効手順・残存リスクは
+`docs/SECURITY.md` にまとめている。
 
 ## 5. push の方式
 

@@ -213,7 +213,7 @@ func TestRouteFollowsAttachDetachAndCallEnd(t *testing.T) {
 	}
 
 	// Backend 作り直しで route は消える (古い Manager のパイプを指さない)。
-	if err := rf.g.startBackend("pw2", ""); err != nil {
+	if err := rf.g.startBackend("pw2", "", provisional{}); err != nil {
 		t.Fatalf("startBackend: %v", err)
 	}
 	if rf.g.route.Load() != nil {

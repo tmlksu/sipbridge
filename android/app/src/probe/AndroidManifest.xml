@@ -33,10 +33,13 @@
             </intent-filter>
         </activity>
 
-        <!-- adb が使える端末では broadcast からも叩ける (scripts/telecom-probe.sh) -->
+        <!-- adb が使える端末では broadcast からも叩ける (scripts/telecom-probe.sh)。
+             permission=DUMP で保護し、adb shell (uid 2000) からの am broadcast -n だけを受ける
+             (第三者アプリは DUMP を取得できない)。 -->
         <receiver
             android:name=".probe.TelecomProbeReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="io.github.tmlksu.sipbridge.PROBE" />
             </intent-filter>

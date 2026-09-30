@@ -79,8 +79,7 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
     private val requestContactsPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             val ctx = context ?: return@registerForActivityResult
-            val cur = BridgeConfig.load(ctx)
-            BridgeConfig.save(ctx, cur.copy(deviceContactsEnabled = granted))
+            updateConfig(ctx) { it.copy(deviceContactsEnabled = granted) }
             refreshAll()
         }
 
@@ -101,7 +100,13 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         val et: EditText,
         val read: (BridgeConfigData) -> String,
         val write: (BridgeConfigData, String) -> BridgeConfigData
-    )
+    ) {
+        /**
+         * 入力欄に最後に入れた保存値。null = まだ保存値を入れていない (設定を一時的に読めなかった等)。
+         * null の欄は保存しない (空欄のまま確定して保存値を "" で上書きしないため, #42)。
+         */
+        var bound: String? = null
+    }
 
     private val fields = mutableListOf<Field>()
 
@@ -169,19 +174,16 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         // 動作カード: モード切替は保存 + Service 再起動
         toggleMode.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked || binding) return@addOnButtonCheckedListener
-            val cur = BridgeConfig.load(requireContext())
             val mode = if (checkedId == R.id.btnModePush) BridgeMode.PUSH else BridgeMode.PERSISTENT
-            if (mode != cur.mode) updateAndRestart(cur.copy(mode = mode))
+            if (mode != BridgeConfig.load(requireContext()).mode) updateAndRestart { it.copy(mode = mode) }
         }
         swAutostart.setOnCheckedChangeListener { _, checked ->
             if (binding) return@setOnCheckedChangeListener
-            val cur = BridgeConfig.load(requireContext())
-            BridgeConfig.save(requireContext(), cur.copy(autostart = checked))
+            updateConfig(requireContext()) { it.copy(autostart = checked) }
         }
         swOverlay.setOnCheckedChangeListener { _, checked ->
             if (binding) return@setOnCheckedChangeListener
-            val cur = BridgeConfig.load(requireContext())
-            BridgeConfig.save(requireContext(), cur.copy(overlayEnabled = checked))
+            updateConfig(requireContext()) { it.copy(overlayEnabled = checked) }
             // ON にした時点で権限が無ければそのまま許可画面へ (着信バブル・
             // 通話中ピルは権限が無いと一切出ないため、ここで気付けるようにする)
             if (checked && !SystemStatus.canDrawOverlays(requireContext())) {
@@ -193,7 +195,7 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         swQuiet.setOnCheckedChangeListener { _, checked ->
             if (binding) return@setOnCheckedChangeListener
             val ctx = requireContext()
-            BridgeConfig.save(ctx, BridgeConfig.load(ctx).copy(serviceNotificationQuiet = checked))
+            updateConfig(ctx) { it.copy(serviceNotificationQuiet = checked) }
             // §6.5: Service 再起動なしで出し直す (停止中なら何もしない)。
             if (BridgeService.running) runCatching {
                 val svc = Intent(ctx, BridgeService::class.java)
@@ -216,15 +218,14 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         }
         swSpeaker.setOnCheckedChangeListener { _, checked ->
             if (binding) return@setOnCheckedChangeListener
-            val cur = BridgeConfig.load(requireContext())
-            BridgeConfig.save(requireContext(), cur.copy(speakerOnAnswer = checked))
+            updateConfig(requireContext()) { it.copy(speakerOnAnswer = checked) }
         }
         swDeviceContacts.setOnCheckedChangeListener { _, checked ->
             if (binding) return@setOnCheckedChangeListener
             val ctx = requireContext()
             if (checked) {
                 if (DeviceContacts.hasPermission(ctx)) {
-                    BridgeConfig.save(ctx, BridgeConfig.load(ctx).copy(deviceContactsEnabled = true))
+                    updateConfig(ctx) { it.copy(deviceContactsEnabled = true) }
                 } else {
                     // 許可されるまで ON にしない。権限ダイアログをここでだけ出す。
                     binding = true
@@ -233,7 +234,7 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
                     requestContactsPermission.launch(Manifest.permission.READ_CONTACTS)
                 }
             } else {
-                BridgeConfig.save(ctx, BridgeConfig.load(ctx).copy(deviceContactsEnabled = false))
+                updateConfig(ctx) { it.copy(deviceContactsEnabled = false) }
             }
             refreshAll()
         }
@@ -249,8 +250,8 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         sliderMicGain.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) = Unit
             override fun onStopTrackingTouch(slider: Slider) {
-                val cur = BridgeConfig.load(requireContext())
-                BridgeConfig.save(requireContext(), cur.copy(micGain = slider.value))
+                val gain = slider.value
+                updateConfig(requireContext()) { it.copy(micGain = gain) }
             }
         })
 
@@ -294,7 +295,11 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
 
     private fun refreshAll() {
         val ctx = context ?: return
-        val cfg = BridgeConfig.load(ctx)
+        // 保存領域に一時的にアクセスできない (#42) ときは既定値で表示を組むが、
+        // 入力欄を空で上書きしたり「未入力」を出したりはしない。
+        val loaded = BridgeConfig.loadOrNull(ctx)
+        val storageUnavailable = loaded == null
+        val cfg = loaded ?: BridgeConfigData()
         binding = true
         try {
             // 状態カード (稼働中かどうかは Service の実状態で判定する)
@@ -315,16 +320,33 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             else getString(R.string.settings_conn_start)
 
             // 未入力の必須項目 (接続できない理由) をまとめて表示
-            val missing = missingItems(cfg)
-            tvSetupHint.text =
-                if (missing.isEmpty()) "" else getString(R.string.settings_setup_missing, missing.joinToString("・"))
-            tvSetupHint.visibility = if (missing.isEmpty()) View.GONE else View.VISIBLE
+            val missing = if (storageUnavailable) emptyList() else missingItems(cfg)
+            // 保存済みの relay URL が使えない形 (旧版で保存した平文の LAN 宛てなど) なら理由を出す (#43)。
+            // 接続側 (RelayClient) はこの場合、設定が変わるまで再接続しない。
+            val savedUrlError = savedRelayUrlError(cfg.relayUrl)
+            if (!storageUnavailable && !tilRelayUrl.hasFocus()) tilRelayUrl.error = savedUrlError
+            // 暗号化ストアが壊れていて初期化した場合は再設定を促す。揃ったら通知を消す (#42)。
+            val resetNotice = !storageUnavailable && BridgeConfig.configResetAt(ctx) > 0L
+            if (resetNotice && missing.isEmpty()) BridgeConfig.clearConfigResetNotice(ctx)
+            val hints = buildList {
+                if (storageUnavailable) add(getString(R.string.settings_warn_storage_unavailable))
+                if (resetNotice && missing.isNotEmpty()) add(getString(R.string.settings_warn_config_reset))
+                if (missing.isNotEmpty()) {
+                    add(getString(R.string.settings_setup_missing, missing.joinToString("・")))
+                }
+                if (savedUrlError != null) add(savedUrlError)
+                // 設定を暗号化できず平文で保存している端末では、その旨も同じ欄に出す (#42)。
+                if (BridgeConfig.plainFallback) add(getString(R.string.settings_warn_plain_storage))
+            }
+            tvSetupHint.text = hints.joinToString("\n")
+            tvSetupHint.visibility = if (hints.isEmpty()) View.GONE else View.VISIBLE
 
             // 接続 / SIP アカウントカード: 保存値を入力欄へ (編集中の欄は触らない)
             fields.forEach { f ->
-                if (f.et.hasFocus()) return@forEach
+                if (f.et.hasFocus() || storageUnavailable) return@forEach
                 val v = f.read(cfg)
                 if (f.et.text?.toString() != v) f.et.setText(v)
+                f.bound = v
             }
 
             // 動作カード
@@ -339,7 +361,8 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
             swSpeaker.isChecked = cfg.speakerOnAnswer
             // システム設定で権限を取り消されていたらトグルも OFF に戻す
             if (cfg.deviceContactsEnabled && !DeviceContacts.hasPermission(ctx)) {
-                BridgeConfig.save(ctx, cfg.copy(deviceContactsEnabled = false))
+                // refreshAll の中から再帰しないよう、失敗時の Toast/再描画はしない。
+                BridgeConfig.update(ctx) { it.copy(deviceContactsEnabled = false) }
                 swDeviceContacts.isChecked = false
             } else {
                 swDeviceContacts.isChecked = cfg.deviceContactsEnabled
@@ -421,25 +444,79 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         }
     }
 
+    /**
+     * 設定の一部を変えて保存する ([BridgeConfig.update]: 読込→変換→書込を原子的に行う)。
+     * 保存領域に一時的にアクセスできず保存できなかったときは理由を知らせ、表示を読み直す
+     * (#42。既定値を元に書いたり平文に書いたりはしない)。
+     */
+    private fun updateConfig(
+        ctx: android.content.Context,
+        transform: (BridgeConfigData) -> BridgeConfigData
+    ): Boolean {
+        val ok = BridgeConfig.update(ctx, transform)
+        if (!ok) {
+            Toast.makeText(ctx, R.string.settings_warn_storage_unavailable, Toast.LENGTH_LONG).show()
+            view?.post { refreshAll() }
+        }
+        return ok
+    }
+
+    /** 保存済みの relay URL が接続に使えない理由 (使えるか空なら null)。 */
+    private fun savedRelayUrlError(url: String): String? {
+        if (url.isBlank()) return null
+        return when (checkRelayUrl(url)) {
+            is RelayUrlCheck.Cleartext -> getString(R.string.settings_err_saved_url_cleartext)
+            is RelayUrlCheck.Invalid -> getString(R.string.settings_err_url_invalid)
+            else -> null
+        }
+    }
+
     /** 1 欄ぶんを保存する。変更が無ければ何もしない。 */
     private fun commitField(f: Field) {
         if (binding) return
         val ctx = context ?: return
-        val cur = BridgeConfig.load(ctx)
-        val next = f.write(cur, f.et.text?.toString() ?: "")
-        // relay URL は形式だけその場で知らせる (保存は止めない)
+        val text = f.et.text?.toString() ?: ""
+        val bound = f.bound
+        if (bound == null) {
+            // まだ保存値を入れていない欄 (設定を読めなかった間に表示した欄など) は保存しない。
+            refreshAll()
+            return
+        }
+        if (text == bound) {
+            // 変更なし。relay URL の欄は、拒否した入力を元に戻した場合に備えて表示だけ直す。
+            if (f.et.id == R.id.etRelayUrl) tilRelayUrl.error = savedRelayUrlError(bound)
+            return
+        }
+        // 検証用。保存は下の update で、その時点の保存値に対して行う。
+        val next = f.write(BridgeConfig.load(ctx), text)
+        // relay URL は形式をその場で知らせる。形式の誤りは保存を止めないが、
+        // 平文 (ws:// / http://) でループバック以外を指すものは保存しない (#43。
+        // Access トークン・SIP パスワードが平文で流れるため)。
         if (f.et.id == R.id.etRelayUrl) {
             val url = next.relayUrl
-            tilRelayUrl.error =
-                if (url.isNotBlank() && runCatching { normalizeRelayUrl(url) }.isFailure)
-                    getString(R.string.settings_err_url_invalid)
-                else null
+            when (val c = if (url.isBlank()) RelayUrlCheck.Empty else checkRelayUrl(url)) {
+                is RelayUrlCheck.Cleartext -> {
+                    tilRelayUrl.error = getString(
+                        if (c.loopbackAllowed) R.string.settings_err_url_cleartext
+                        else R.string.settings_err_url_cleartext_release
+                    )
+                    return
+                }
+                is RelayUrlCheck.Invalid -> tilRelayUrl.error = getString(R.string.settings_err_url_invalid)
+                else -> tilRelayUrl.error = null
+            }
         }
-        if (next == cur) return
-        BridgeConfig.save(ctx, next)
+        var changed = false
+        var saved: BridgeConfigData? = null
+        val ok = updateConfig(ctx) { cur ->
+            f.write(cur, text).also { changed = it != cur; saved = it }
+        }
+        val after = saved
+        if (ok && after != null) f.bound = f.read(after)
+        if (!ok || !changed || after == null) return
         // 稼働中かつ接続に必要な項目が揃っているときだけ張り直す。
-        if (BridgeService.running && missingItems(next).isEmpty()) {
-            restartBridge(next)
+        if (BridgeService.running && missingItems(after).isEmpty()) {
+            restartBridge(after)
         }
         refreshAll()
     }
@@ -476,9 +553,11 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
     }
 
     /** 動作カードの項目 (モードなど) は 1 項目でも接続に関わるので同じ扱い。 */
-    private fun updateAndRestart(d: BridgeConfigData) {
+    private fun updateAndRestart(transform: (BridgeConfigData) -> BridgeConfigData) {
         val ctx = requireContext()
-        BridgeConfig.save(ctx, d)
+        var saved: BridgeConfigData? = null
+        if (!updateConfig(ctx) { transform(it).also { n -> saved = n } }) return
+        val d = saved ?: return
         CallHub.micGain = d.micGain
         if (BridgeService.running && missingItems(d).isEmpty()) restartBridge(d)
         refreshAll()
@@ -488,7 +567,14 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         val ctx = requireContext()
         commitFocusedField()
         if (!BridgeService.running) {
-            val missing = missingItems(BridgeConfig.load(ctx))
+            val loaded = BridgeConfig.loadOrNull(ctx)
+            if (loaded == null) {
+                // 保存領域に一時的にアクセスできない (#42)。「未入力」とは出さない。
+                Toast.makeText(ctx, R.string.settings_warn_storage_unavailable, Toast.LENGTH_LONG).show()
+                refreshAll()
+                return
+            }
+            val missing = missingItems(loaded)
             if (missing.isNotEmpty()) {
                 Toast.makeText(
                     ctx,
@@ -633,7 +719,7 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         AlertDialog.Builder(ctx)
             .setTitle(R.string.settings_row_telecom)
             .setSingleChoiceItems(labels, prefs.indexOf(cur)) { d, which ->
-                BridgeConfig.save(ctx, BridgeConfig.load(ctx).copy(telecomPref = prefs[which]))
+                updateConfig(ctx) { it.copy(telecomPref = prefs[which]) }
                 TelecomTierManager.sync(ctx)
                 d.dismiss()
                 refreshAll()

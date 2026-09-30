@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- クラウドバックアップ・端末間移行の対象から全データを外す (#48, API 31+)。
+     API 31+ では allowBackup="false" でも端末間移行 (device-transfer) は止まらないため、
+     ここで全 domain を明示的に除外する。
+     設定 (EncryptedSharedPreferences) の復号鍵は Android Keystore にあり移行先へ持ち出せないので、
+     暗号化された設定ファイルだけが移ると復号できない壊れた状態になる。また暗号化できず
+     平文で保存している端末 (BridgeConfig の平文モード) では認証情報がそのまま移る。 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

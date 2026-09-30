@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 
@@ -23,14 +24,27 @@ const recvSlabSize = 16 << 10
 // maxDatagram は 1 回の受信で読む上限である。
 const maxDatagram = 2048
 
+// minRTPHeader は RTP 固定ヘッダの長さである。
+const minRTPHeader = 12
+
 // rtpPipe は UDP ソケット上の RTP 送受パイプである。
 // call.MediaPipe を満たす。RTCP と見られるパケットは捨てる。
 // Close は冪等である。
+//
+// 受信は送信元 IP を「現在の SDP c= の IP」∪「SIP の信頼集合 (trusted)」と照合し、
+// それ以外を捨てる。ポートは見ない (NAT・rtp_symmetric・再ネゴシエーションで
+// ずれるため)。同居構成では c=127.0.0.1 に対し実送信元が LOCAL_IP になるので、
+// c= だけで照合すると全音声が落ちる。宛先が未確定 (remote nil) なら全て捨てる。
+// 受信元へのラッチ (送信先の書き換え) はしない。
 type rtpPipe struct {
 	conn *net.UDPConn
 
-	mu     sync.RWMutex
-	remote *net.UDPAddr
+	mu       sync.RWMutex
+	remote   *net.UDPAddr
+	remoteIP netip.Addr // remote の IP (比較用に正規化済み)
+
+	// trusted は SIP の信頼集合の照合関数である (nil なら c= のみで照合)。
+	trusted func(netip.Addr) bool
 
 	ch        chan []byte
 	closed    chan struct{}
@@ -40,6 +54,8 @@ type rtpPipe struct {
 	// log は破棄の警告先である (未設定なら slog.Default)。
 	log     *slog.Logger
 	dropped atomic.Uint64
+	// rejected は送信元・形式の検査で捨てたパケット数である。
+	rejected atomic.Uint64
 	// stats は Asterisk→relay 区間の受信統計 (readLoop だけが書く。atomic)。
 	stats rtpstats.Stats
 }
@@ -47,14 +63,16 @@ type rtpPipe struct {
 var _ call.MediaPipe = (*rtpPipe)(nil)
 
 // newRTPPipe はソケットと初期宛先からパイプを作り、受信ループを開始する。
-func newRTPPipe(conn *net.UDPConn, remote *net.UDPAddr, log *slog.Logger) *rtpPipe {
+// trusted は SIP の信頼集合の照合関数 (nil 可) である。
+func newRTPPipe(conn *net.UDPConn, remote *net.UDPAddr, log *slog.Logger, trusted func(netip.Addr) bool) *rtpPipe {
 	p := &rtpPipe{
-		conn:   conn,
-		remote: remote,
-		ch:     make(chan []byte, recvQueueLen),
-		closed: make(chan struct{}),
-		log:    log,
+		conn:    conn,
+		ch:      make(chan []byte, recvQueueLen),
+		closed:  make(chan struct{}),
+		log:     log,
+		trusted: trusted,
 	}
+	p.setRemote(remote)
 	p.wg.Add(1)
 	go p.readLoop()
 	return p
@@ -73,11 +91,44 @@ func (p *rtpPipe) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// setRemote は送信宛先を更新する (re-INVITE 追従用)。
+// RejectedPackets は送信元・形式の検査で捨てたパケット数である。
+func (p *rtpPipe) RejectedPackets() uint64 { return p.rejected.Load() }
+
+// setRemote は送信宛先を更新する (re-INVITE 追従用)。受信の送信元照合も追従する。
 func (p *rtpPipe) setRemote(remote *net.UDPAddr) {
+	var ip netip.Addr
+	if remote != nil {
+		if a, ok := netip.AddrFromSlice(remote.IP); ok {
+			ip = normAddr(a)
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.remote = remote
+	p.remoteIP = ip
+}
+
+// acceptSource は送信元 IP からの受信を受け入れるかを返す。
+func (p *rtpPipe) acceptSource(src netip.Addr) bool {
+	src = normAddr(src)
+	p.mu.RLock()
+	hasRemote := p.remote != nil
+	rip := p.remoteIP
+	p.mu.RUnlock()
+	if !hasRemote {
+		return false // 宛先未確定は fail-closed
+	}
+	if rip.IsValid() && !rip.IsUnspecified() && src == rip {
+		return true
+	}
+	return p.trusted != nil && p.trusted(src)
+}
+
+// reject は検査で捨てたパケットを数え、間引いてログに出す。
+func (p *rtpPipe) reject(src netip.Addr, why string) {
+	if n := p.rejected.Add(1); n == 1 || n%dropLogEvery == 0 {
+		p.logger().Warn("RTP 受信を破棄", "reason", why, "src", src.String(), "rejected", n)
+	}
 }
 
 // Send は RTP パケットを相手に UDP 送信する。
@@ -124,7 +175,7 @@ func (p *rtpPipe) readLoop() {
 	// GC が最後の参照が消えた時点で回収する。
 	var slab []byte
 	for {
-		n, _, err := p.conn.ReadFromUDP(buf)
+		n, src, err := p.conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			// Close による終了が通常系である。
 			return
@@ -132,8 +183,16 @@ func (p *rtpPipe) readLoop() {
 		if n <= 0 {
 			continue
 		}
+		if !p.acceptSource(src.Addr()) {
+			p.reject(src.Addr(), "source")
+			continue
+		}
 		if isRTCP(buf[:n]) {
-			continue // v1 では RTCP を扱わない
+			continue // v1 では RTCP を扱わない (rtcp_mux 時。数えない)
+		}
+		if n < minRTPHeader || buf[0]>>6 != 2 {
+			p.reject(src.Addr(), "not_rtp")
+			continue
 		}
 		p.stats.Observe(buf[:n])
 		if len(slab) < n {

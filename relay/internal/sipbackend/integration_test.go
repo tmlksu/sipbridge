@@ -228,6 +228,50 @@ func TestIntegrationAsteriskRegister(t *testing.T) {
 	}
 }
 
+// TestIntegrationAsteriskWrongPassword は誤パスワードの REGISTER が
+// EvRegistered{OK:false} かつ AuthRejected() (401/403) になることを確認する
+// (session が仮の資格情報を取り消す判定に使う)。
+func TestIntegrationAsteriskWrongPassword(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	host, port, _, _ := itestEnv(t)
+	be, err := New(Config{
+		SIPHost: host, SIPPort: port, User: "101", Password: "definitely-wrong",
+		LocalIP: "127.0.0.1", RTPPortMin: 40300, RTPPortMax: 40350,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := make(chan call.Event, 32)
+	if err := be.Start(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case e := <-ev:
+			reg, ok := e.(call.EvRegistered)
+			if !ok {
+				continue
+			}
+			if reg.OK {
+				t.Fatalf("誤パスワードで REGISTER に成功した")
+			}
+			if reg.Code == 0 {
+				t.Logf("応答なし (再試行を待つ): %s", reg.Detail)
+				continue
+			}
+			if !reg.AuthRejected() {
+				t.Fatalf("認証拒否として扱われない: code=%d detail=%s", reg.Code, reg.Detail)
+			}
+			t.Logf("認証拒否: code=%d detail=%s", reg.Code, reg.Detail)
+			return
+		case <-deadline:
+			t.Fatal("REGISTER の結果が来ない")
+		}
+	}
+}
+
 func TestIntegrationAsteriskIncoming(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

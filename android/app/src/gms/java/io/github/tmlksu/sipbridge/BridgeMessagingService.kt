@@ -45,7 +45,7 @@ class BridgeMessagingService : FirebaseMessagingService() {
         // 処理を終えた時点で放す。最長でも 30 秒で切れる)。
         BridgeService.holdWakeBridge(this)
         val caller = data["caller"] ?: data["from"]
-        Log.i(TAG, "着信 push 受信: callId=${data["callId"]} from=$caller")
+        Log.i(TAG, "着信 push 受信: callId=${data["callId"]} from=${LogRedact.id(caller)}")
         // §6.2 到達性の記録: push が届いた時刻。
         PushHealth.markPushReceived(this)
         // bind 失敗などで届いていないトークンがあれば、この機会に再配送する。

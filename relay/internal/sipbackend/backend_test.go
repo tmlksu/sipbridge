@@ -100,8 +100,8 @@ func TestRTPPipeLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pa := newRTPPipe(a, b.LocalAddr().(*net.UDPAddr), nil)
-	pb := newRTPPipe(b, a.LocalAddr().(*net.UDPAddr), nil)
+	pa := newRTPPipe(a, b.LocalAddr().(*net.UDPAddr), nil, nil)
+	pb := newRTPPipe(b, a.LocalAddr().(*net.UDPAddr), nil, nil)
 	defer pa.Close()
 	defer pb.Close()
 

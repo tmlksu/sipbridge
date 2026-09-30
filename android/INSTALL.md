@@ -72,7 +72,7 @@ scripts/adb-setup.sh <serial> foss \
 
 | キー | 値 |
 |---|---|
-| `relayUrl` | `wss://…` |
+| `relayUrl` | `wss://…` (平文の `ws://` はループバック宛てのみ受け付ける。adb reverse 試験用) |
 | `accessClientId` / `accessClientSecret` / `devToken` | 認証情報 |
 | `sipUser` / `sipPassword` / `sipDisplay` | SIP アカウント (内線番号/パスワード/表示名) |
 | `mode` | `PERSISTENT` / `PUSH` |
