@@ -1,4 +1,4 @@
-# SIP Bridge アプリ UI 設計 (v1.4) — `docs/design/android-app-design.pdf` の文章化
+# SIP Bridge アプリ UI 設計 (v1.4)
 
 作成: 2026-09-16。原本は Claude Design のアートボード 4 枚 (Galaxy S25 縦)。
 実装対象は Android アプリ (`android/`)。**Echo Show 5 (960×480 横, API 30) でも崩れないこと**が

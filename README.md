@@ -5,7 +5,7 @@
 
 - `DESIGN.md` — 方式検討と採用理由
 - `docs/PROTOCOL.md` — relay ⇄ アプリの WebSocket プロトコル (v1.1: SIP アカウントはアプリ側で設定)
-- `docs/UI-DESIGN.md` — アプリ画面仕様 (`docs/design/android-app-design.pdf` の文章化)
+- `docs/UI-DESIGN.md` — アプリ画面仕様
 - `scripts/` — ビルド/テスト一括 (`check.sh`)・端末投入 (`adb-setup.sh`)・アイコン生成 (`gen-icon.py`)
 - `docs/DISTRIBUTION.md` — 配布 (F-Droid を第一ターゲット) の検証結果と残タスク
 - `docs/RELEASE.md` — リリース署名 (applicationId / keystore) と GitHub Releases の手順
