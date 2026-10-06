@@ -1,0 +1,8 @@
+* Set up by QR code or pasted text: relay, Access service token and SIP account in one go
+* Reconnects if incoming audio stops for 3 s during a call
+* Your voice no longer lags on a slow network
+* PUSH mode holds no battery-draining locks while idle
+* Faster contact search with many device contacts
+* Sends call quality stats (no numbers) to the relay after each call
+* Plain ws:// / http:// relay URLs are rejected (use wss://)
+* Settings excluded from backup/transfer; numbers masked in logs
