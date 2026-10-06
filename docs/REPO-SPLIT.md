@@ -31,6 +31,7 @@ public 側の issue / PR が private に還流せず、export のたびに上書
   relay/  android/  deploy/  docs/  scripts/  fdroid/
   .gitignore                   ← ops/ を無視
   .githooks/pre-commit         ← コミット前に公開安全性を検査 (任意で有効化)
+  .githooks/commit-msg         ← 作者・trailer のメールが noreply か検査
   ops/                         ← private リポジトリ (別の .git)
     .gitignore                 ← ops にも秘密情報を入れない
     ENVIRONMENT.md             ← 置換表・秘密の在り処
@@ -129,8 +130,10 @@ ops/split-repos.sh --apply
 ### コミット前の検査
 
 `git config core.hooksPath .githooks` を一度実行すると、`.githooks/pre-commit` が
-コミットのたびに `scripts/check-public-safe.sh` を走らせる (`--apply` は public の
-init 時に自動で設定する)。
+コミットのたびに `scripts/check-public-safe.sh` を、`.githooks/commit-msg` が
+`scripts/check-commit-meta.sh` (作者・コミッタ・`Co-Authored-By:` などのメールが noreply か) を
+走らせる (`--apply` は public の init 時に自動で設定する)。フックを通らない Devin (Web) の
+PR は CI (`build.yml` の `public-safe` ジョブ) が同じ検査をする。
 
 ## 以後の運用
 

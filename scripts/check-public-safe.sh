@@ -27,6 +27,21 @@ mapfile -t FILES < <(git ls-files --cached --others --exclude-standard -- . ':!o
   | grep -vE '\.(png|jpg|jpeg|gif|pdf|apk|aab|jar|so|aar|keystore|jks)$')
 [ ${#FILES[@]} -eq 0 ] && { echo "検査対象なし"; exit 0; }
 
+# PDF は圧縮されていて grep では読めないので、文字を取り出して検査対象に加える
+# (2026-10 にデザイン PDF 内のドメインを見逃した)。結果の表示は「<一時dir>/<パス>.txt」になる。
+mapfile -t PDFS < <(git ls-files --cached --others --exclude-standard -- '*.pdf' ':!ops/')
+if [ ${#PDFS[@]} -gt 0 ]; then
+  if command -v pdftotext >/dev/null; then
+    PDFTXT=$(mktemp -d); trap 'rm -rf "$PDFTXT"' EXIT
+    for f in "${PDFS[@]}"; do
+      mkdir -p "$PDFTXT/$(dirname "$f")"
+      pdftotext -q "$f" "$PDFTXT/$f.txt" && FILES+=("$PDFTXT/$f.txt")
+    done
+  else
+    report "PDF があるが pdftotext (poppler-utils) が無く中身を検査できない" "${PDFS[@]}"
+  fi
+fi
+
 # --- 1. インスタンス固有の禁止パターン (ops/deny-patterns.txt) ---
 DENY="ops/deny-patterns.txt"
 if [ -f "$DENY" ]; then

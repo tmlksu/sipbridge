@@ -14,6 +14,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 公開リポジトリに個人情報・固有情報が入っていないか。ops/deny-patterns.txt は
+  # 公開側に無いので汎用の検査だけになる。commit-msg フックを通らない Devin (Web) の
+  # PR もここで止める。
+  public-safe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: PDF 検査用の pdftotext
+        run: |
+          if [ -n "$(git ls-files '*.pdf')" ]; then
+            sudo apt-get update -q && sudo apt-get install -y -q poppler-utils
+          fi
+
+      - name: ファイル
+        run: scripts/check-public-safe.sh
+
+      - name: コミットの作者・trailer
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            range="$PUSH_BEFORE..$GITHUB_SHA"
+          else
+            range="$GITHUB_SHA"
+          fi
+          scripts/check-commit-meta.sh "$range"
+
   android:
     runs-on: ubuntu-latest
     defaults:
