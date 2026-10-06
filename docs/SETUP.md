@@ -295,6 +295,34 @@ Galaxy S25 (gms flavor・PUSH モード) の起床用。Echo Show 5 (foss flavor
 | マイクゲイン | 既定値のまま | 通話相手の聞こえ方で調整 |
 | オーバーレイ / 自動起動 | Echo Show 5 は ON | S25 は OFF でも FCM で起床する |
 
+### 7-1. QR コードで渡す (v1.6〜)
+
+他の人の端末を設定するとき、上の値を手で打ってもらう代わりに QR コードで渡せる。
+
+1. `tools/provision-qr.html` をブラウザで開く (file:// のままでよい。通信はしない)。
+2. relay URL・Service Token の Client ID / Secret・内線番号・SIP パスワード・表示名・モードを入れる。
+   **空欄の項目は QR に入らず、端末の今の設定がそのまま残る** (例: SIP パスワードだけ口頭で伝える運用も可)。
+3. 端末のアプリで 設定 → 接続 →「QR コードで設定」を押して読み取る (初回はカメラ権限を求める)。
+   接続先ホスト・内線などの確認ダイアログが出るので「設定する」。必要な項目が揃っていれば、
+   停止中ならそのまま開始し、稼働中なら接続し直す。
+   - カメラの無い端末や離れた相手には、生成画面の「テキストをコピー」で出る 1 行の JSON を
+     アプリの「貼り付けで設定」に貼ってもらう。
+   - Echo Show 5 は前面カメラで読む。カメラのシャッター (物理スライダー) を開けておく。
+
+QR コード・テキストには Access Secret と SIP パスワードがそのまま入る。画像をチャットや
+クラウドに残さないこと。漏れたら Zero Trust で Service Token を失効 (Revoke) し、SIP パスワードを変える。
+既に接続したことのある端末の Service Token を QR で差し替えると、`DEVICE_BINDING=enforce` では
+409 になる (下のトラブルシュート)。
+
+形式 (1 行の JSON。`sipbridge` は版番号で、ほかのキーは省略可):
+
+```json
+{"sipbridge":1,"url":"wss://relay.example.com","cid":"<Client ID>","cs":"<Client Secret>",
+ "user":"101","pw":"<SIP パスワード>","name":"居間","mode":"PERSISTENT"}
+```
+
+`tok` (Dev Token) も使える。アプリ側の解釈は `android/app/src/main/java/io/github/tmlksu/sipbridge/ProvisioningPayload.kt`。
+
 `X-Device-Id` はアプリが初回起動時に生成・保存する (意識する必要なし)。
 アプリ名は「SIP Bridge」。旧 EchoSIP (`com.echosip`) とは applicationId が
 異なる (`io.github.tmlksu.sipbridge`) ため共存できる。

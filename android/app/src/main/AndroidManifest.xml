@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -25,9 +26,14 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 端末の連絡先連携 (v1.2) 用。要求するのは設定トグルを ON にしたときだけ。 -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- 設定 QR コードの読み取り (v1.6) 用。要求するのは「QR コードで設定」を押したときだけ。
+         zxing-android-embedded の manifest からも合流するが、使う理由をここに残す。 -->
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <!-- カメラが無い端末でも入れられるように (QR は貼り付けでも入力できる)。 -->
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <!-- API 30+: resolveActivity の可視性確保 (§6.1 休止除外の対応判定用)。
          minSdk 29 では無視される。 -->
@@ -83,6 +89,13 @@
             android:launchMode="singleTop"
             android:excludeFromRecents="true"
             android:theme="@style/Theme.SipBridge.Call" />
+
+        <!-- 設定 QR コードの読み取り画面 (zxing-android-embedded)。ライブラリ既定の
+             横向き固定 (sensorLandscape) だとスマホを縦に持ったときに使いにくいので、端末の回転設定に従わせる。 -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="unspecified"
+            tools:replace="android:screenOrientation" />
 
         <service
             android:name=".BridgeService"

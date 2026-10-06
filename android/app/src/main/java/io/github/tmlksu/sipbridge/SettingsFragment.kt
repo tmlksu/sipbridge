@@ -21,6 +21,8 @@ import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.slider.Slider
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputLayout
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 /**
  * UI-DESIGN §1.4 設定。
@@ -91,6 +93,15 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             refreshAll()
         }
+
+    /**
+     * 設定 QR コードの読み取り (zxing-android-embedded の画面)。カメラ権限はその画面が要求する。
+     * キャンセル・権限拒否のときは contents が null で、何もしない。
+     */
+    private val scanProvisioning = registerForActivityResult(ScanContract()) { result ->
+        val text = result.contents ?: return@registerForActivityResult
+        if (context != null) onProvisioningText(text)
+    }
 
     /**
      * インライン入力欄 1 つぶんの束縛。いずれも接続に関わる項目なので、
@@ -170,6 +181,10 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         bindField(view.findViewById(R.id.etSipUser), { it.sipUser }, { c, v -> c.copy(sipUser = v.trim()) })
         bindField(view.findViewById(R.id.etSipPassword), { it.sipPassword }, { c, v -> c.copy(sipPassword = v) })
         bindField(view.findViewById(R.id.etSipDisplay), { it.sipDisplay }, { c, v -> c.copy(sipDisplay = v.trim()) })
+
+        // 設定 QR コード / 貼り付けで接続・SIP アカウントをまとめて入れる
+        view.findViewById<View>(R.id.btnProvisionScan).setOnClickListener { openProvisionScan() }
+        view.findViewById<View>(R.id.btnProvisionPaste).setOnClickListener { openProvisionPaste() }
 
         // 動作カード: モード切替は保存 + Service 再起動
         toggleMode.addOnButtonCheckedListener { _, checkedId, isChecked ->
@@ -618,6 +633,128 @@ class SettingsFragment : Fragment(), CallHub.StateListener {
         } else if (code == 12) {
             // 通知権限の結果。状態表示だけ更新する。
             refreshAll()
+        }
+    }
+
+    // ---- 設定 QR コード (ProvisioningPayload, 生成側は tools/provision-qr.html) ----
+
+    private fun openProvisionScan() {
+        val ctx = requireContext()
+        commitFocusedField()
+        if (!ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            Toast.makeText(ctx, R.string.provision_no_camera, Toast.LENGTH_LONG).show()
+            return
+        }
+        // 背面カメラが無い端末 (Echo Show 5) では ZXing が前面カメラを選ぶ。
+        val opts = ScanOptions()
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt(getString(R.string.provision_scan_prompt))
+            .setBeepEnabled(false)
+            .setOrientationLocked(false)
+        runCatching { scanProvisioning.launch(opts) }.onFailure {
+            Toast.makeText(ctx, R.string.setup_open_fail, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** カメラが無い・遠隔で渡したいとき用。QR と同じ文字列 (JSON) を貼り付けてもらう。 */
+    private fun openProvisionPaste() {
+        val ctx = requireContext()
+        commitFocusedField()
+        val et = EditText(ctx).apply {
+            hint = getString(R.string.provision_paste_hint)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            minLines = 3
+            maxLines = 6
+            typeface = android.graphics.Typeface.MONOSPACE
+            textSize = 12f
+        }
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val box = android.widget.FrameLayout(ctx).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(et)
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.provision_paste_title)
+            .setView(box)
+            .setPositiveButton(R.string.provision_paste_ok) { _, _ ->
+                onProvisioningText(et.text?.toString() ?: "")
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun onProvisioningText(text: String) {
+        val ctx = context ?: return
+        when (val r = ProvisioningPayload.parse(text)) {
+            is ProvisioningPayload.Result.Error -> AlertDialog.Builder(ctx)
+                .setTitle(R.string.provision_error_title)
+                .setMessage(r.message)
+                .setPositiveButton(R.string.common_close, null)
+                .show()
+            is ProvisioningPayload.Result.Ok -> confirmProvisioning(r.payload)
+        }
+    }
+
+    /**
+     * 適用前の確認。接続先ホストを必ず見せる (他人の relay を指す QR を読まされると
+     * SIP パスワードや Access トークンがそこへ送られるため)。秘密そのものは表示しない。
+     */
+    private fun confirmProvisioning(p: ProvisioningPayload) {
+        val ctx = context ?: return
+        val cleared = getString(R.string.provision_line_cleared)
+        fun shown(v: String) = v.ifBlank { cleared }
+        val lines = buildList {
+            p.relayUrl?.let { add(getString(R.string.provision_line_relay, shown(p.relayHost() ?: ""))) }
+            p.accessClientId?.let {
+                // Client ID は秘密ではないが長いので先頭だけ (Access の一覧と照合できる程度)。
+                val head = if (it.length > 12) it.take(8) + "…" else it
+                add(getString(R.string.provision_line_access, shown(head)))
+            }
+            if (!p.accessClientSecret.isNullOrBlank()) add(getString(R.string.provision_line_access_secret))
+            if (!p.devToken.isNullOrBlank()) add(getString(R.string.provision_line_dev_token))
+            p.sipUser?.let { add(getString(R.string.provision_line_user, shown(it))) }
+            if (!p.sipPassword.isNullOrEmpty()) add(getString(R.string.provision_line_password))
+            p.sipDisplay?.let { add(getString(R.string.provision_line_display, shown(it))) }
+            p.mode?.let {
+                val label = if (it == BridgeMode.PUSH) getString(R.string.settings_mode_push)
+                else getString(R.string.settings_mode_persistent)
+                add(getString(R.string.provision_line_mode, label))
+            }
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.provision_confirm_title)
+            .setMessage(lines.joinToString("\n") + "\n\n" + getString(R.string.provision_confirm_note))
+            .setPositiveButton(R.string.provision_confirm_apply) { _, _ -> applyProvisioning(p) }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    /**
+     * 読み込んだ項目を保存する。揃っていれば、停止中なら開始し、稼働中なら張り直す
+     * (受け取った人が QR を読むだけで使い始められるように)。
+     */
+    private fun applyProvisioning(p: ProvisioningPayload) {
+        val ctx = context ?: return
+        commitFocusedField()
+        var saved: BridgeConfigData? = null
+        var changed = false
+        val ok = updateConfig(ctx) { cur ->
+            p.applyTo(cur).also { saved = it; changed = it != cur }
+        }
+        val d = saved
+        if (!ok || d == null) return
+        refreshAll()
+        val missing = missingItems(d)
+        when {
+            missing.isNotEmpty() -> Toast.makeText(
+                ctx, getString(R.string.provision_applied_missing, missing.joinToString("・")),
+                Toast.LENGTH_LONG
+            ).show()
+            !BridgeService.running -> onStartStop()
+            changed -> restartBridge(d)
+            else -> Toast.makeText(ctx, R.string.provision_applied, Toast.LENGTH_SHORT).show()
         }
     }
 
