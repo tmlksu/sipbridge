@@ -93,6 +93,8 @@ unzip -p "$APK" classes.dex | strings | grep -cE 'Lcom/google/(firebase|android/
 
 ## 4. Play に進む場合の追加項目 (今回は着手しない)
 
+> 2026-09-18 に Play 出品の要件を改めて調査した。最新の整理は `docs/PLAY.md` を正とする。
+
 - `compileSdk`/`targetSdk` 36 化 + Echo Show 5 (API 30) / S25 (API 35) の実機リグレッション
 - リリース署名 + Play App Signing
 - 制限付き権限の宣言: `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `USE_FULL_SCREEN_INTENT`
