@@ -343,6 +343,7 @@ v1.2 以前は applicationId が `net.peyan.sipbridge` だった。**別アプ�
 | relay が 409 `device_binding_mismatch` (ログに「端末 ID の principal が記録と不一致」、アプリは再接続を繰り返す) | `DEVICE_BINDING=enforce` で、その端末の Service Token を作り直した等。`docs/SECURITY.md` §5 の手順で記録を消す |
 | relay が 401 (ログに「JWT 検証失敗」) | `CF_TEAM_DOMAIN` (iss) と `CF_ACCESS_AUD` がその Access アプリケーションのものか |
 | relay が 503 | 同時接続の端末数が `MAX_ONLINE_DEVICES` に達している |
+| relay が 429 (ログに「端末 ID の同時接続数が上限」) | 同じ端末 ID の接続が 4 本残っている。正規の端末なら古い接続が閉じれば数秒で通る。続くなら同じ端末 ID を名乗る別の接続 (漏洩トークン・端末の複製) を疑う |
 | `sip_account` / `register_push` に `rate_limited` / `too_many_*` | 試行制限・上限 (`docs/PROTOCOL.md`)。`too_many_*` は不要な端末/アカウントを状態ファイルから整理するか上限を上げる |
 | アプリに `account_failed` (「SIP サーバが認証を拒否」) | 新しく設定した内線番号/パスワードが Asterisk に拒否され続けたため relay が取り消した。設定を確認して入れ直す (`docs/SECURITY.md` §3.3) |
 | Asterisk でパスワードを変えたら新パスワードが `account_password_mismatch` | その account に結び付いた端末が残っていない。`docs/SECURITY.md` §3.3 の手順で状態ファイルを直す |

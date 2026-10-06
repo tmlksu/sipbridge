@@ -22,6 +22,7 @@ WS へ昇格する前に次の場合も拒否する (docs/SECURITY.md):
 | 400 | `X-Device-Id` が無い、または `^[A-Za-z0-9._:-]{1,64}$` に合わない |
 | 401 | (上記の JWT 検証失敗に加え) `DEVICE_BINDING=enforce` で JWT に認証主体 (`sub` / `common_name`) が無い |
 | 409 | `DEVICE_BINDING=enforce` で、その端末 ID に記録された認証主体と異なる。本文は `device_binding_mismatch` |
+| 429 | その端末 ID の同時接続数 (受け入れ途中を含む) が上限 (4)。古い接続が閉じれば次の再接続で通る |
 | 503 | 同時接続の端末数が上限 (`MAX_ONLINE_DEVICES`)。接続中・保存済みの端末の再接続は対象外 |
 
 認証主体 (principal) は `sub:<ユーザー ID>` (IdP ログイン) または `cn:<Client ID>` (Service Token) の形で扱う。

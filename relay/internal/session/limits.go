@@ -17,6 +17,11 @@ const (
 	DefaultMaxAccounts      = 16
 	DefaultMaxStoredDevices = 64
 	DefaultMaxOnlineDevices = 32
+	// DefaultMaxConnsPerDevice は 1 つの端末 ID が同時に持てる WS 接続 (受け入れ途中を含む)
+	// の上限である (#51)。正規の端末は新しい接続で古い接続を置換するので通常は 1 本だが、
+	// 応答しない古い接続は close 待ち (最大 5 秒程度) の間残るため、張り直しが続いても
+	// 弾かないよう 1 より大きくしておく。
+	DefaultMaxConnsPerDevice = 4
 	// DefaultAuthFailureDelay は sip_account のパスワード誤り (と試行制限) の
 	// 応答を遅らせる時間である。1 接続は逐次処理なので、これが試行速度の上限になる。
 	DefaultAuthFailureDelay = time.Second
@@ -168,17 +173,33 @@ func (h *Hub) pinPrincipal(c *Conn) {
 
 // ---- オンライン端末数 ----
 
+// reserveOnline の拒否理由。
+type reserveResult int
+
+const (
+	reserveOK reserveResult = iota
+	// reserveTooManyDevices は同時接続の端末数が MaxOnlineDevices に達している。
+	reserveTooManyDevices
+	// reserveTooManyConns はこの端末 ID の同時接続数が MaxConnsPerDevice に達している (#51)。
+	reserveTooManyConns
+)
+
 // reserveOnline は接続を受け入れる前に端末の枠を予約する。既に接続中・
-// 予約中・保存済み (既知) の端末は上限に達していても通す (再接続や
-// replaceDuplicateConns による張り替えを弾かない)。ok なら addConn の後で
-// release を呼ぶこと (Accept 失敗時も)。
-func (h *Hub) reserveOnline(deviceID string) (release func(), ok bool) {
+// 予約中・保存済み (既知) の端末は端末数の上限に達していても通す (再接続や
+// replaceDuplicateConns による張り替えを弾かない)。ただし 1 つの端末 ID の
+// 同時接続数 (接続中 + 受け入れ途中) は既知の端末でも MaxConnsPerDevice までに
+// 制限する (#51: 保存済みの ID を名乗って WS を大量に張る FD 枯渇を防ぐ)。
+// reserveOK なら addConn の後で release を呼ぶこと (Accept 失敗時も)。
+func (h *Hub) reserveOnline(deviceID string) (release func(), res reserveResult) {
 	_, known := h.store.Device(deviceID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, online := h.conns[deviceID]
+	set, online := h.conns[deviceID]
+	if len(set)+h.pending[deviceID] >= h.cfg.MaxConnsPerDevice {
+		return nil, reserveTooManyConns
+	}
 	if !online && !known && h.pending[deviceID] == 0 && h.onlineCountLocked() >= h.cfg.MaxOnlineDevices {
-		return nil, false
+		return nil, reserveTooManyDevices
 	}
 	h.pending[deviceID]++
 	var once sync.Once
@@ -190,7 +211,7 @@ func (h *Hub) reserveOnline(deviceID string) (release func(), ok bool) {
 				delete(h.pending, deviceID)
 			}
 		})
-	}, true
+	}, reserveOK
 }
 
 // onlineCountLocked は接続中と受け入れ途中の端末 (deviceID) 数である (hub.mu 保持)。
