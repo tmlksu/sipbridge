@@ -82,6 +82,9 @@ type Config struct {
 	// MaxOnlineDevices は同時接続の端末 (deviceID) 数の上限。接続中・保存済みの
 	// 端末の再接続は上限に達していても受け入れる。
 	MaxOnlineDevices int
+	// MaxConnsPerDevice は 1 つの端末 ID の同時 WS 接続数 (受け入れ途中を含む) の上限 (#51)。
+	// 既知の端末にも適用する。0 なら DefaultMaxConnsPerDevice (4)。
+	MaxConnsPerDevice int
 	// AuthFailureDelay は sip_account 失敗 (パスワード不一致・試行制限) の応答遅延。
 	AuthFailureDelay time.Duration
 	// MaxAuthFailures は 1 接続あたりの sip_account 失敗の許容回数 (到達で切断)。
@@ -121,6 +124,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxOnlineDevices <= 0 {
 		c.MaxOnlineDevices = DefaultMaxOnlineDevices
+	}
+	if c.MaxConnsPerDevice <= 0 {
+		c.MaxConnsPerDevice = DefaultMaxConnsPerDevice
 	}
 	if c.AuthFailureDelay <= 0 {
 		c.AuthFailureDelay = DefaultAuthFailureDelay
@@ -493,7 +499,8 @@ func (h *Hub) probeDeadDevices(ctx context.Context, suspects map[string]string, 
 //
 // X-Device-Id ヘッダが必須で、^[A-Za-z0-9._:-]{1,64}$ 以外は 400。
 // DEVICE_BINDING=enforce で端末 ID の principal が記録と異なれば 409 (device_binding_mismatch)、
-// オンライン端末数が上限なら 503 を返す (いずれも WS へ昇格する前)。
+// オンライン端末数が上限なら 503、端末 ID の同時接続数が上限なら 429 を返す
+// (いずれも WS へ昇格する前)。
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	deviceID := r.Header.Get("X-Device-Id")
 	if deviceID == "" {
@@ -506,11 +513,19 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal := PrincipalFromContext(r.Context())
-	release, ok := h.reserveOnline(deviceID)
-	if !ok {
+	release, res := h.reserveOnline(deviceID)
+	switch res {
+	case reserveTooManyDevices:
 		h.log.Warn("オンライン端末数が上限のため接続を拒否", "device", deviceID,
 			"principal", principal, "max", h.cfg.MaxOnlineDevices)
 		http.Error(w, "接続中の端末数が上限に達している", http.StatusServiceUnavailable)
+		return
+	case reserveTooManyConns:
+		// 正規の端末なら古い接続が閉じ切れば次の再接続で通る。接続元 IP は
+		// 乱用の調査用に出す (認証失敗・principal 不一致と同じ扱い, SECURITY.md §3)。
+		h.log.Warn("端末 ID の同時接続数が上限のため接続を拒否", "device", deviceID,
+			"principal", principal, "max", h.cfg.MaxConnsPerDevice, "ip", ClientIP(r))
+		http.Error(w, "この端末 ID の同時接続数が上限に達している", http.StatusTooManyRequests)
 		return
 	}
 	// 端末 ID と principal の検査は枠の予約の後に行う (503 で拒否する接続で

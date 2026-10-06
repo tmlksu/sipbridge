@@ -166,6 +166,32 @@
                     android:textColor="@color/nocturne_text_dim"
                     android:textSize="12sp" />
 
+                <!-- 設定 QR コード (tools/provision-qr.html で作る) で接続・SIP アカウントをまとめて入れる -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnProvisionScan"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginEnd="4dp"
+                        android:text="@string/provision_scan" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnProvisionPaste"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="4dp"
+                        android:text="@string/provision_paste" />
+                </LinearLayout>
+
                 <com.google.android.material.textfield.TextInputLayout
                     android:id="@+id/tilRelayUrl"
                     style="@style/Widget.SipBridge.TextInput"

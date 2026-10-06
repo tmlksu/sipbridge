@@ -49,8 +49,8 @@ android {
         applicationId = "io.github.tmlksu.sipbridge"
         minSdk = 29
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.5.4"
+        versionCode = 11
+        versionName = "1.6.0"
     }
     buildFeatures {
         // RelayProtocol.CLIENT_VERSION が versionName を参照するため。
@@ -129,6 +129,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // 設定の暗号化保存 (BridgeConfig)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // 設定 QR コードの読み取り (SettingsFragment)。Apache-2.0、GMS 不要なので
+    // GApps の無い Echo Show と F-Droid (foss) でも使える。ML Kit は GMS 依存のため使わない。
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     // gms flavor のみ: T5 で FCM 受信に使用。plugin 無しでもビルドは通る。
     gmsImplementation("com.google.firebase:firebase-messaging:23.4.1")
 

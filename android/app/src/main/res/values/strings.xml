@@ -278,4 +278,27 @@
     <string name="setup_item_telecom">通話アカウントを有効化</string>
     <string name="setup_item_telecom_desc">OS標準の通話画面で発着信します。発信アカウント設定でSIP Bridgeを有効にしてください</string>
     <string name="setup_item_telecom_desc_need_permission">電話の権限（発信・電話状態の確認）が無いためOS標準の通話画面を使えません。許可してから有効にしてください</string>
+    <!-- 設定 QR コード (v1.6, ProvisioningPayload) -->
+    <string name="provision_scan">QR コードで設定</string>
+    <string name="provision_paste">貼り付けで設定</string>
+    <string name="provision_scan_prompt">設定用の QR コードを枠に合わせてください</string>
+    <string name="provision_paste_title">設定コードを貼り付け</string>
+    <string name="provision_paste_hint">{\"sipbridge\":1,…}</string>
+    <string name="provision_paste_ok">読み込む</string>
+    <string name="provision_error_title">読み込めませんでした</string>
+    <string name="provision_confirm_title">この内容で設定しますか?</string>
+    <string name="provision_confirm_note">接続先が知らないホストなら設定しないでください (SIP パスワードがその接続先へ送られます)。書かれていない項目は今の設定のまま残ります。</string>
+    <string name="provision_confirm_apply">設定する</string>
+    <string name="provision_line_relay">接続先: %1$s</string>
+    <string name="provision_line_access">Access Client ID: %1$s</string>
+    <string name="provision_line_access_secret">Access Secret: 含む</string>
+    <string name="provision_line_dev_token">Dev Token: 含む</string>
+    <string name="provision_line_user">内線番号: %1$s</string>
+    <string name="provision_line_password">SIP パスワード: 含む</string>
+    <string name="provision_line_display">表示名: %1$s</string>
+    <string name="provision_line_mode">モード: %1$s</string>
+    <string name="provision_line_cleared">(空にする)</string>
+    <string name="provision_applied">設定を読み込みました</string>
+    <string name="provision_applied_missing">設定を読み込みました。%1$s を入力してから開始してください</string>
+    <string name="provision_no_camera">カメラが無いため QR コードを読めません。「貼り付けで設定」を使ってください</string>
 </resources>

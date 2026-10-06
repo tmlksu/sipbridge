@@ -394,6 +394,52 @@ func TestOnlineDeviceLimit(t *testing.T) {
 	}
 }
 
+// TestConnsPerDeviceLimit は #51: 保存済み (既知) の端末 ID でも、同時接続数が
+// MaxConnsPerDevice に達したら 429 で拒否し、古い接続が閉じ切れば再び受け入れることを確認する。
+func TestConnsPerDeviceLimit(t *testing.T) {
+	st, _ := state.New("")
+	_ = st.SetDevicePush("dev-K", state.Push{Provider: "fcm", Token: "tok-K"}) // 既知の端末
+	fx := newSecFixture(t, st, session.Config{MaxConnsPerDevice: 2})
+	a1 := dial(t, fx.url, "dev-K")
+	defer a1.Close(websocket.StatusNormalClosure, "")
+	readSkipReg(t, a1)
+	// a1 は読まないので、置換の close に応答しない (close 待ちの間 relay 側に残る)。
+	a2 := dial(t, fx.url, "dev-K")
+	defer a2.Close(websocket.StatusNormalClosure, "")
+
+	if code := dialStatus(t, fx.url, "dev-K", ""); code != http.StatusTooManyRequests {
+		t.Fatalf("同時接続数の上限超過: status = %d (429 のはず)", code)
+	}
+	// 別の端末 ID は影響を受けない。
+	o := dial(t, fx.url, "dev-O")
+	defer o.Close(websocket.StatusNormalClosure, "")
+	if _, ok := readSkipReg(t, o).(*proto.Hello); !ok {
+		t.Fatalf("別の端末 ID で hello が来ない")
+	}
+
+	// a1 が置換の close に応答すれば枠が空き、同じ端末 ID の再接続が通る。
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, err := a1.Read(ctx); websocket.CloseStatus(err) != 4001 {
+		t.Fatalf("古い接続が置換されない: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		ws, _, err := dialWith(t, fx.url, "dev-K", "")
+		if err == nil {
+			defer ws.Close(websocket.StatusNormalClosure, "")
+			if _, ok := readSkipReg(t, ws).(*proto.Hello); !ok {
+				t.Fatalf("枠が空いた後の再接続で hello が来ない")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("古い接続が閉じた後も再接続できない: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestDeviceBindingEnforce は DEVICE_BINDING=enforce で、記録済みと異なる
 // principal からの同じ端末 ID の接続が WS 昇格前に 409 になり、オンライン
 // 扱いにならない (正規端末への push を止めない) ことを確認する。

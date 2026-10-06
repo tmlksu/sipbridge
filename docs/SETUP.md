@@ -295,6 +295,34 @@ Galaxy S25 (gms flavor・PUSH モード) の起床用。Echo Show 5 (foss flavor
 | マイクゲイン | 既定値のまま | 通話相手の聞こえ方で調整 |
 | オーバーレイ / 自動起動 | Echo Show 5 は ON | S25 は OFF でも FCM で起床する |
 
+### 7-1. QR コードで渡す (v1.6〜)
+
+他の人の端末を設定するとき、上の値を手で打ってもらう代わりに QR コードで渡せる。
+
+1. `tools/provision-qr.html` をブラウザで開く (file:// のままでよい。通信はしない)。
+2. relay URL・Service Token の Client ID / Secret・内線番号・SIP パスワード・表示名・モードを入れる。
+   **空欄の項目は QR に入らず、端末の今の設定がそのまま残る** (例: SIP パスワードだけ口頭で伝える運用も可)。
+3. 端末のアプリで 設定 → 接続 →「QR コードで設定」を押して読み取る (初回はカメラ権限を求める)。
+   接続先ホスト・内線などの確認ダイアログが出るので「設定する」。必要な項目が揃っていれば、
+   停止中ならそのまま開始し、稼働中なら接続し直す。
+   - カメラの無い端末や離れた相手には、生成画面の「テキストをコピー」で出る 1 行の JSON を
+     アプリの「貼り付けで設定」に貼ってもらう。
+   - Echo Show 5 は前面カメラで読む。カメラのシャッター (物理スライダー) を開けておく。
+
+QR コード・テキストには Access Secret と SIP パスワードがそのまま入る。画像をチャットや
+クラウドに残さないこと。漏れたら Zero Trust で Service Token を失効 (Revoke) し、SIP パスワードを変える。
+既に接続したことのある端末の Service Token を QR で差し替えると、`DEVICE_BINDING=enforce` では
+409 になる (下のトラブルシュート)。
+
+形式 (1 行の JSON。`sipbridge` は版番号で、ほかのキーは省略可):
+
+```json
+{"sipbridge":1,"url":"wss://relay.example.com","cid":"<Client ID>","cs":"<Client Secret>",
+ "user":"101","pw":"<SIP パスワード>","name":"居間","mode":"PERSISTENT"}
+```
+
+`tok` (Dev Token) も使える。アプリ側の解釈は `android/app/src/main/java/io/github/tmlksu/sipbridge/ProvisioningPayload.kt`。
+
 `X-Device-Id` はアプリが初回起動時に生成・保存する (意識する必要なし)。
 アプリ名は「SIP Bridge」。旧 EchoSIP (`com.echosip`) とは applicationId が
 異なる (`io.github.tmlksu.sipbridge`) ため共存できる。
@@ -315,6 +343,7 @@ v1.2 以前は applicationId が `net.peyan.sipbridge` だった。**別アプ�
 | relay が 409 `device_binding_mismatch` (ログに「端末 ID の principal が記録と不一致」、アプリは再接続を繰り返す) | `DEVICE_BINDING=enforce` で、その端末の Service Token を作り直した等。`docs/SECURITY.md` §5 の手順で記録を消す |
 | relay が 401 (ログに「JWT 検証失敗」) | `CF_TEAM_DOMAIN` (iss) と `CF_ACCESS_AUD` がその Access アプリケーションのものか |
 | relay が 503 | 同時接続の端末数が `MAX_ONLINE_DEVICES` に達している |
+| relay が 429 (ログに「端末 ID の同時接続数が上限」) | 同じ端末 ID の接続が 4 本残っている。正規の端末なら古い接続が閉じれば数秒で通る。続くなら同じ端末 ID を名乗る別の接続 (漏洩トークン・端末の複製) を疑う |
 | `sip_account` / `register_push` に `rate_limited` / `too_many_*` | 試行制限・上限 (`docs/PROTOCOL.md`)。`too_many_*` は不要な端末/アカウントを状態ファイルから整理するか上限を上げる |
 | アプリに `account_failed` (「SIP サーバが認証を拒否」) | 新しく設定した内線番号/パスワードが Asterisk に拒否され続けたため relay が取り消した。設定を確認して入れ直す (`docs/SECURITY.md` §3.3) |
 | Asterisk でパスワードを変えたら新パスワードが `account_password_mismatch` | その account に結び付いた端末が残っていない。`docs/SECURITY.md` §3.3 の手順で状態ファイルを直す |
