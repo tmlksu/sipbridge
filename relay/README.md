@@ -145,3 +145,10 @@ go test -tags integration ./...
 - `internal/sipbackend`: sipgo による `call.Backend` 実装 (REGISTER/UAS/UAC/RTP)
 - `internal/session`: WS セッション管理 (`X-Device-Id` 単位、account グループ、`hello`、20 秒 ping、fanout、勝者のみ中継)
 - `cmd/wsprobe`: E2E 用 WS プローブ CLI
+
+## 外から SIP UA を使う (`relay/sipua`)
+
+relay の SIP UA (Asterisk に内線として REGISTER し、着信・発信・RTP を扱う部分) は
+`github.com/tmlksu/sipbridge/relay/sipua` から使える (中身は `internal/sipbackend` と
+`internal/call` の型の別名。テスト用の偽 Backend は `sipua/sipuatest`)。
+AI 内線 [aibot](https://github.com/tmlksu/aibot) がこれを使う。ここに出した名前は消したり意味を変えたりしない。
