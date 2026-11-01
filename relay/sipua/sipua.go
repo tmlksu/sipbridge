@@ -1,7 +1,7 @@
 // Package sipua は relay の SIP UA (Asterisk に普通の内線として REGISTER し、
 // 着信・発信・RTP を扱う) を relay の外から使うための公開窓口である。
 //
-// 別リポジトリの AI 内線 (github.com/tmlksu/aibot) が使う。中身は
+// relay とは別に動く SIP 内線アプリ (AI 内線など) から使う。中身は
 // internal/sipbackend と internal/call の型の別名と薄い関数だけで、relay の挙動は変えない。
 // 互換性: ここに出した名前は、使う側を壊さないよう消したり意味を変えたりしない。
 package sipua

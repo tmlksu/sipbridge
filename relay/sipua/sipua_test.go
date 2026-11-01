@@ -19,10 +19,10 @@ var (
 )
 
 func TestValidateUser(t *testing.T) {
-	if err := sipua.ValidateUser("2180"); err != nil {
-		t.Fatalf("ValidateUser(2180): %v", err)
+	if err := sipua.ValidateUser("101"); err != nil {
+		t.Fatalf("ValidateUser(101): %v", err)
 	}
-	if err := sipua.ValidateUser("21\r\n80"); err == nil {
+	if err := sipua.ValidateUser("10\r\n1"); err == nil {
 		t.Fatal("改行入りのユーザー名を通した")
 	}
 }
